@@ -50,12 +50,14 @@ type pendingCall struct {
 type delivery struct {
 	Owner  string              `json:"owner"`
 	Output protocol.ChatOutput `json:"output"`
+	Nodes  []string            `json:"nodes"` // nil denotes legacy, unscoped data
 }
 type historyItem struct {
 	Role string `json:"role"`
 	Text string `json:"text"`
 }
 type dialogue struct {
+	Nodes   []string      `json:"nodes"`
 	Remote  string        `json:"remote_focus,omitempty"`
 	Focus   string        `json:"focus,omitempty"`
 	Pending string        `json:"pending,omitempty"`
@@ -294,15 +296,21 @@ func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
 			switch m.Type {
 			case "chat":
 				v, e := protocol.Decode[protocol.ChatInput](m)
-				if e != nil || !protocol.ValidID(v.ID) || strings.TrimSpace(v.Text) == "" || len(v.Text) > protocol.MaxText {
+				if e != nil || !protocol.ValidID(v.ID) || m.ID != v.ID {
 					return
+				}
+				if e = v.Validate(); e != nil {
+					if p.Send(protocol.Wrap("chat_reject", v.ID, protocol.Fault{Code: "invalid", Message: e.Error()})) != nil {
+						return
+					}
+					continue
 				}
 				e = h.db.Update(func(t *store.Tx) error {
 					var old chatRecord
 					e := t.Get("inbox", id+"/"+v.ID, &old)
 					if e == nil {
 						if old.Input.Text != v.Text {
-							return errors.New("message ID conflict")
+							return fmt.Errorf("%w: message ID conflict", protocol.ErrInvalidInput)
 						}
 						return nil
 					}
@@ -312,6 +320,9 @@ func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
 					return h.queueInput(t, id, v)
 				})
 				if e != nil {
+					if errors.Is(e, protocol.ErrInvalidInput) && p.Send(protocol.Wrap("chat_reject", v.ID, protocol.Fault{Code: "conflict", Message: e.Error()})) == nil {
+						continue
+					}
 					return
 				}
 				if p.Send(protocol.Wrap("chat_ack", v.ID, nil)) != nil {
@@ -470,7 +481,12 @@ func (h *Hub) call(ctx context.Context, owner, node, tool, title string, args an
 func (h *Hub) putOutput(t *store.Tx, owner, text, session, run string) error {
 	return h.queueOutput(t, owner, protocol.ChatOutput{Text: text, Session: session, RunID: run})
 }
-func (h *Hub) queueOutput(t *store.Tx, owner string, o protocol.ChatOutput) error {
+func (h *Hub) queueOutput(t *store.Tx, owner string, o protocol.ChatOutput, nodes ...string) error {
+	d := delivery{Owner: owner, Output: o, Nodes: append([]string{}, nodes...)}
+	ok, err := h.deliveryAllowed(t, d)
+	if err != nil || !ok {
+		return err
+	}
 	var seq int64
 	if err := t.Get("meta", "output_sequence", &seq); err != nil && !errors.Is(err, store.ErrMissing) {
 		return err
@@ -480,7 +496,48 @@ func (h *Hub) queueOutput(t *store.Tx, owner string, o protocol.ChatOutput) erro
 		return err
 	}
 	o.ID, o.Sequence = protocol.ID("out_"), seq
-	return t.Put("outbox", o.ID, delivery{owner, o})
+	d.Output = o
+	return t.Put("outbox", o.ID, d)
+}
+
+// Check stored resource bindings as well as the complete model-context scope.
+// A final reply may summarize several nodes even if it has only one focus ID.
+func (h *Hub) deliveryAllowed(t *store.Tx, d delivery) (bool, error) {
+	if _, ok := h.c.Channels[d.Owner]; !ok {
+		return false, nil
+	}
+	for _, node := range d.Nodes {
+		if !h.allowed(d.Owner, node) {
+			return false, nil
+		}
+	}
+	if d.Output.Session != "" {
+		var b Binding
+		if err := t.Get("sessions", d.Output.Session, &b); err != nil {
+			if errors.Is(err, store.ErrMissing) {
+				return false, nil
+			}
+			return false, err
+		}
+		if b.Owner != d.Owner || !h.allowed(d.Owner, b.Session.Node) {
+			return false, nil
+		}
+	}
+	if d.Output.JobID != "" {
+		var b RemoteBinding
+		if err := t.Get("remote_jobs", d.Output.JobID, &b); err != nil {
+			if errors.Is(err, store.ErrMissing) {
+				return false, nil
+			}
+			return false, err
+		}
+		if b.Owner != d.Owner || !h.allowed(d.Owner, b.Snapshot.Job.Node) {
+			return false, nil
+		}
+	}
+	// Legacy model replies have no complete provenance, even when focused on
+	// one session. They cannot be safely sent after a permission change.
+	return d.Nodes != nil, nil
 }
 func (h *Hub) event(node string, e protocol.Event) (bool, error) {
 	if !protocol.ValidID(e.ID) || !protocol.ValidID(e.Session) || !protocol.ValidID(e.Instance) || len(e.Text) > protocol.MaxText+4 {
@@ -524,9 +581,10 @@ func (h *Hub) event(node string, e protocol.Event) (bool, error) {
 		// Old replay may be recorded, but must not regress the visible state.
 		stamp, _ := time.Parse(time.RFC3339Nano, e.Time)
 		last, _ := time.Parse(time.RFC3339Nano, b.EventTime)
-		if (e.Position > 0 && e.Position <= b.EventPosition) || (e.Position == 0 && stamp.Before(last)) || b.Session.Status == "closed" {
+		if (e.Position > 0 && e.Position <= b.EventPosition) || (e.Position == 0 && stamp.Before(last)) {
 			return nil
 		}
+		closed := b.Session.Status == "closed"
 		if e.Position > 0 {
 			b.EventPosition = e.Position
 		}
@@ -585,6 +643,9 @@ func (h *Hub) event(node string, e protocol.Event) (bool, error) {
 		default:
 			return errors.New("unknown event kind")
 		}
+		if closed {
+			b.Session.Status = "closed"
+		}
 		if err := t.Put("sessions", e.Session, b); err != nil {
 			return err
 		}
@@ -612,7 +673,7 @@ func (h *Hub) event(node string, e protocol.Event) (bool, error) {
 				return err
 			}
 		}
-		if e.Kind == "settled" {
+		if e.Kind == "settled" && !closed && h.allowed(b.Owner, node) {
 			var w watchRecord
 			if err := t.Get("watches", e.Session, &w); err == nil {
 				if w.RunID == e.RunID {
@@ -624,7 +685,7 @@ func (h *Hub) event(node string, e protocol.Event) (bool, error) {
 				return err
 			}
 		}
-		if text != "" {
+		if text != "" && h.allowed(b.Owner, node) {
 			return h.putOutput(t, b.Owner, text, e.Session, e.RunID)
 		}
 		return nil
@@ -694,6 +755,25 @@ func (h *Hub) Serve(ctx context.Context) {
 			for _, id := range ids {
 				var d delivery
 				if json.Unmarshal(m[id], &d) != nil {
+					continue
+				}
+				allowed := false
+				if err := h.db.Update(func(t *store.Tx) error {
+					var e error
+					allowed, e = h.deliveryAllowed(t, d)
+					if e != nil {
+						return e
+					}
+					if !allowed {
+						return t.Delete("outbox", id)
+					}
+					return nil
+				}); err != nil {
+					log.Printf("hub output authorization: %v", err)
+					continue
+				}
+				if !allowed {
+					log.Printf("hub output %s discarded: authorization revoked or legacy provenance missing", id)
 					continue
 				}
 				h.mu.Lock()

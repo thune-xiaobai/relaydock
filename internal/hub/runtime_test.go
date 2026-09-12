@@ -355,5 +355,16 @@ func TestRealPiRuntime(t *testing.T) {
 	if live.Status != "exited" {
 		t.Fatal(live)
 	}
+	// Close both a live bridge and an exited pi with a retained pane through
+	// the actual Hub/Worker tools, including tmux's exact-name kill target.
+	for _, binding := range []Binding{find("a"), find("b")} {
+		r := h.executeTool(ctx, "console", &dialogue{}, "session_close", protocol.JSON(map[string]string{"session_id": binding.Session.ID}))
+		if !r.OK {
+			t.Fatal(r)
+		}
+	}
+	if find("a").Session.Status != "closed" || find("b").Session.Status != "closed" {
+		t.Fatal("close did not persist")
+	}
 	t.Log("real pi SDK multistep coordinator + tmux/pi: parallel sessions, native continuation/switch, local/offline event replay, Worker restart, dedupe, interrupt and pi exit verified using fixture model")
 }

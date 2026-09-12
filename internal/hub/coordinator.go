@@ -20,9 +20,10 @@ type Coordinator interface {
 	Run(context.Context, Turn, func(context.Context, string, json.RawMessage) ToolReply) (string, error)
 }
 type Turn struct {
-	Owner   string `json:"owner"`
-	Input   string `json:"input"`
-	Context any    `json:"context"`
+	Owner   string   `json:"owner"`
+	Input   string   `json:"input"`
+	Context any      `json:"context"`
+	Nodes   []string `json:"nodes"`
 }
 type ToolReply struct {
 	OK        bool   `json:"ok"`

@@ -66,6 +66,64 @@ func (w *Worker) mux(ctx context.Context, args ...string) ([]byte, error) {
 	return b, nil
 }
 
+func (w *Worker) muxExists(ctx context.Context, name string) (bool, error) {
+	if w.c.Backend == "psmux" {
+		return w.psmuxRegistered(name)
+	}
+	// Listing and comparing whole names avoids tmux's prefix target matching.
+	b, err := w.mux(ctx, "list-sessions", "-F", "#{session_name}")
+	if len(b) >= protocol.MaxText {
+		return false, errors.New("mux session list is truncated")
+	}
+	if err != nil {
+		// tmux emits this only for a missing server socket. Exit status alone
+		// cannot distinguish absence from permissions or an unusable binary.
+		message := strings.TrimSpace(string(b))
+		if w.c.Backend == "tmux" && (strings.HasPrefix(message, "no server running on ") ||
+			strings.HasPrefix(message, "error connecting to ") && strings.HasSuffix(message, "(No such file or directory)")) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (w *Worker) psmuxRegistered(name string) (bool, error) {
+	// psmux list-sessions silently skips unresponsive/unauthenticated servers.
+	// Its registry (upstream src/paths.rs) is the conservative existence check;
+	// any remaining entry means we must successfully kill the exact session.
+	dir, override := os.LookupEnv("PSMUX_DATA_DIR")
+	if !override {
+		profile := os.Getenv("USERPROFILE")
+		if !filepath.IsAbs(profile) {
+			return false, errors.New("cannot locate psmux registry; set absolute PSMUX_DATA_DIR or USERPROFILE")
+		}
+		dir = filepath.Join(profile, ".psmux")
+	}
+	if !filepath.IsAbs(dir) {
+		return false, errors.New("PSMUX_DATA_DIR must be absolute and nonempty")
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	base := w.c.Namespace + "__" + name + "."
+	for _, entry := range entries {
+		if strings.HasPrefix(strings.ToLower(entry.Name()), strings.ToLower(base)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (w *Worker) start(ctx context.Context, s *protocol.Session) error {
 	dir := w.dir(s.ID)
 	l := Launch{w.c.Agents[s.Agent], w.c.Workspaces[s.Workspace], w.c.Bridge, dir, s.ID}

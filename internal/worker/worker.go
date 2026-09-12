@@ -127,12 +127,16 @@ func (w *Worker) inspect(id string) (protocol.Session, error) {
 		return s, nil
 	}
 	stamp, err := time.Parse(time.RFC3339Nano, b.Updated)
-	if err != nil || time.Since(stamp) > 8*time.Second || b.Session != id {
+	if b.Session != id || !protocol.ValidID(b.Instance) || b.Native == "" {
 		s.Status = "unknown"
 		return s, nil
 	}
 	s.Instance = b.Instance
 	s.Native = b.Native
+	if err != nil || time.Since(stamp) > 8*time.Second {
+		s.Status = "unknown"
+		return s, nil
+	}
 	s.Status = b.Status
 	s.RunID = b.RunID
 	s.Updated = b.Updated
@@ -383,16 +387,34 @@ func (w *Worker) execute(ctx context.Context, c protocol.Call) protocol.Result {
 		if s.Status == "closed" {
 			return ok(s)
 		}
-		if s.Status != "exited" {
-			if a.Instance == "" || a.Instance != s.Instance || a.Native != s.Native {
+		// An owned mux may exist even if pi never initialized. Conversely a
+		// vanished mux leaves no bridge heartbeat/exit file to release its slot.
+		if s.MuxName != s.ID || !strings.HasPrefix(s.ID, "s_") {
+			return protocol.Fail(c.ID, "unknown", "managed mux identity is missing")
+		}
+		exists, e := w.muxExists(ctx, s.MuxName)
+		if e != nil {
+			return fail("unknown", e)
+		}
+		if exists {
+			if s.Status != "exited" && s.Instance == "" {
+				if _, statErr := os.Stat(filepath.Join(w.dir(s.ID), "state.json")); !errors.Is(statErr, os.ErrNotExist) {
+					return protocol.Fail(c.ID, "unknown", "cannot identify existing pi bridge; inspect its state before closing")
+				}
+			}
+			if s.Status != "exited" && s.Instance != "" && (a.Instance == "" || a.Instance != s.Instance || a.Native != s.Native) {
 				return protocol.Fail(c.ID, "stale_target", "inspect session and supply current instance/native_session")
 			}
-			if _, e := w.mux(ctx, "kill-session", "-t", s.MuxName); e != nil {
-				return fail("unknown", e)
+			target := s.MuxName
+			if w.c.Backend == "tmux" {
+				target = "=" + target
 			}
-		} else if _, e := w.mux(ctx, "has-session", "-t", s.MuxName); e == nil {
-			if _, e = w.mux(ctx, "kill-session", "-t", s.MuxName); e != nil {
-				return fail("unknown", e)
+			if _, e := w.mux(ctx, "kill-session", "-t", target); e != nil {
+				// It may have exited between inspection and kill. Only a positive
+				// absence check can turn that error into a successful close.
+				if live, checkErr := w.muxExists(ctx, s.MuxName); checkErr != nil || live {
+					return fail("unknown", e)
+				}
 			}
 		}
 		s.Status = "closed"

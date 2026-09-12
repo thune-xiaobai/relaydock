@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -110,6 +112,17 @@ type ChatInput struct {
 	Text       string `json:"text"`
 	ObservedAt string `json:"observed_at,omitempty"`
 }
+
+// ErrInvalidInput is a permanent ingress rejection, never a storage/network error.
+var ErrInvalidInput = errors.New("invalid chat input")
+
+func (in ChatInput) Validate() error {
+	if !ValidID(in.ID) || strings.TrimSpace(in.Text) == "" || len(in.Text) > MaxText {
+		return fmt.Errorf("%w: valid ID and 1..65536 bytes of nonblank text required", ErrInvalidInput)
+	}
+	return nil
+}
+
 type ChatOutput struct {
 	ID       string `json:"id"`
 	Sequence int64  `json:"sequence"`

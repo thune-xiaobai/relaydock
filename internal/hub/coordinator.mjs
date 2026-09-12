@@ -1,5 +1,6 @@
 // Pi owns the agent loop and persistent history. Go owns all remote authority.
 import { createInterface } from "node:readline";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { join, dirname, resolve } from "node:path";
 import { mkdir, stat, readFile } from "node:fs/promises";
@@ -32,7 +33,10 @@ try {
   const { createAgentSession, ModelRuntime, SessionManager, SettingsManager, DefaultResourceLoader, defineTool } = sdk;
   const cwd = join(cfg.root, cfg.turn.owner);
   const agentDir = join(cwd, "config");
-  const sessions = join(cwd, "sessions");
+  // The SDK has its own persistent history. A changed authorization scope
+  // must not load messages/tools from the previous set of authorized nodes.
+  const scope = createHash("sha256").update(JSON.stringify([...new Set(cfg.turn.nodes || [])].sort())).digest("hex");
+  const sessions = join(cwd, "sessions", scope);
   await mkdir(agentDir, { recursive: true, mode: 0o700 });
   await mkdir(sessions, { recursive: true, mode: 0o700 });
   const modelRuntime = await ModelRuntime.create({

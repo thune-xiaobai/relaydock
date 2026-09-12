@@ -220,7 +220,7 @@ pi install npm:@injaneity/pi-computer-use
 
 每个角色有独立 `state_dir`，SQLite 使用 WAL 和进程锁。不要让两个进程共用一个 state directory。生产配置、token 和会话文本保存在用户本机，配置支持从环境变量读取凭据。
 
-Hub 的 SDK 原生历史位于 `hub-state/coordinator/<channel-id>/sessions/`，与 Go 的业务回执分别保存。`session_watch` 保存一次性后续；完成事件只入队一次，注册晚于完成也能处理。后续仍经过同样的权限、调用上限和不确定性检查。
+Hub 的 SDK 原生历史位于 `hub-state/coordinator/<channel-id>/sessions/<授权节点集合的哈希>/`，与 Go 的业务回执分别保存。节点授权变化后使用对应范围的历史，Go 也会清除包含已撤权节点的对话上下文。`session_watch` 保存一次性后续；完成事件只入队一次，注册晚于完成也能处理。后续仍经过同样的权限、调用上限和不确定性检查。
 
 每个任务 Session 的文件位于 `worker-state/sessions/<session-id>/`：
 
@@ -234,11 +234,21 @@ native/                pi 原生会话文件
 exit.json              独立 launcher 记录的 pi 退出事实
 ```
 
-扩展投递输入前先记录结果未知，成功调用后再记录已接受；崩溃窗口内不会盲目重试。Worker 将每个事件及读取位置一起写入 SQLite，Hub 将事件去重、会话状态和待发送回复一起写入 SQLite。事件次序使用本机日志位置，避免时钟或跨实例序号造成状态倒退。
+扩展投递输入前先记录结果未知，仅在 pi 实际启动并接纳对应用户消息后记录已接受，不等待整轮完成。缺少模型、凭据等可确认的预检失败返回 `rejected` 并恢复空闲。pi 0.85.1 的扩展发送 API 不返回 Promise；投递后若 5 秒没有可关联的启动事实（例如其他扩展拦截、异步校验失败或延迟），状态转为 `unknown`，不会误报仍在运行，也不会自动重发。可以查看原 pi，必要时显式关闭或在本地切换原生会话后继续；不相关的本地运行不会替旧请求确认接受。
+
+Worker 将每个事件及读取位置一起写入 SQLite，Hub 将事件去重、会话状态和待发送回复一起写入 SQLite。关闭会话后仍接收待补报的输出和结束事件，保持 `closed`，不触发已取消的后续安排。事件次序使用本机日志位置，避免时钟或跨实例序号造成状态倒退。
 
 Worker 重启后重新读取原 Session，不重建 pi。重连时 Hub 只通过 `call_status` 查询未确认的旧调用，Worker 不因查询执行工具。如果 Hub 在解释或派发过程中重启，已开始却未完成的聊天请求标为待核对，并回复不确定性说明；尚未开始的请求按原顺序继续。旧版本没有 started / sequence 的未完成记录保守地标为待核对。
 
-没有自动重试任务、自动复活 pi、跨机器迁移或机器重启后自动恢复执行。pi 心跳超过 8 秒未更新时显示 `unknown`，不能仅凭 mux/pane 存在认定 pi 可用。`session.create` 启动失败但结果未知时可能保留待核对 Session；先检查其终端/日志，不能盲目再次创建。
+Hub 保存最终回复的事务失败时，保留本次结果并退避重试数据库写入，同时打印错误；不会再次运行协调器或工具。读取对话失败也会等待恢复。持续故障会暂停后续协调；若这期间关闭或崩溃，未落盘的请求仍按重启时的不确定性规则处理，不能保证找回内存中的最终回复。
+
+没有自动重试任务、自动复活 pi、跨机器迁移或机器重启后自动恢复执行。pi 心跳超过 8 秒未更新时显示 `unknown`，不能仅凭 mux/pane 存在认定 pi 可用。启动失败的 Session 可以显式 `session.close`：未初始化桥接也能清理自己创建的受管终端，确认关闭或不存在后释放目录；权限错误、mux 不可用等不会当作不存在。psmux 的列表会跳过未响应会话，因此 Windows 使用 `PSMUX_DATA_DIR` 或 `USERPROFILE/.psmux` 内的命名空间登记文件保守判断存在性；无法确定该目录时拒绝清理，不能猜测路径。已初始化的活动会话仍要求匹配当前实例和原生会话。
+
+Hub 入队和实际下发输出时都重新检查节点授权，涵盖 pi 消息、shell 完成通知和可能汇总多节点的最终回复。撤权后仍保存 Worker 状态并确认事件，以便恢复与去重，但不再向该 Channel 发送。已经交付到 Channel / Gateway 的内容无法由 Hub 撤回。
+
+空白或超长聊天输入被永久拒绝，Hub 通过 `chat_reject` 返回原因，Channel 持久记录在 `rejected` 并移出 pending；旧版本遗留的空白 pending 也会清理。Gateway 将无效消息保留在 `rejected_inputs` 后继续接收，文件 spool 将无效文件移到 `rejected/`。数据库、文件权限或网络等暂时错误仍保留请求重试，不会误当作永久拒绝。
+
+升级到此版本时一并更新 Hub、Channel、Worker 和 pi 扩展（已有 pi 可在本地 `/reload`）。旧版没有完整授权来源记录的 Hub 待发输出不再自动发送，日志会记录丢弃的 ID；原始会话和结果仍保留，可重新查询。旧 SDK 历史文件保留但不自动加载，避免撤权后旧上下文继续泄漏；建议升级前先让旧待发队列排空。
 
 第一版保守地给每个活跃 Session 保留整个实际目录，`max_running` 因而限制的是活跃 Session 数量。关闭 Session 后释放目录；已退出 pi 不再占用该目录。外部编辑器或未受管进程不属于操作系统隔离范围。
 
@@ -251,14 +261,15 @@ Worker 重启后重新读取原 Session，不重建 pi。重连时 Hub 只通过
 ```sh
 go test -race ./...
 go vet ./...
-RELAYDOCK_TEST_PI=1 go test -race ./internal/hub -run 'TestRealPi(RemoteRuntime|Runtime)$' -v -count=1
+RELAYDOCK_TEST_PI=1 go test -race ./internal/hub -run 'TestRealPi(RemoteRuntime|Runtime|CoordinatorHistoryScope)$' -v -count=1
+RELAYDOCK_TEST_PI=1 go test -race ./internal/worker -run TestRealPiBridgeReceipts -v -count=1
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o build/relaydock-windows-amd64.exe ./cmd/relaydock
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/relaydock-linux-amd64 ./cmd/relaydock
 ```
 
 覆盖真正的 pi SDK 多步循环与结果驱动下一步、完成后唤醒、原生会话延续、并行任务、本地输入回传、Worker 重启、去重、中断和退出。Gateway 的本地协议 / 桌面夹具覆盖版本与 ID 检查、超时断开、源绑定、控件重新定位、聊天变化保护、重复文本 occurrence、检查点恢复、发送顺序及未知发送不重试。
 
-shell 测试还覆盖本机进程输出、中文分页、并发/取消/超时、输出截断、WSS 断线完成补报、通知去重和 shell-only 运行。
+shell 测试还覆盖本机进程输出、中文分页、并发/取消/超时、输出截断、WSS 断线完成补报、通知去重和 shell-only 运行。故障回归覆盖 pi 预检失败 / 无启动事件 / 延迟回调、失败启动的清理、撤权后消息与历史过滤、关闭后的消息补报、无效输入队列，以及 SQLite 写失败恢复时不重跑请求。
 
 交叉编译只证明构建成功。目标 Windows 上 remote shell 还需验证 PowerShell 运行策略、本机程序退出码与编码、Job Object 的子进程清理。已有功能仍需验证 psmux 的实际命令兼容性、helper protocol v3、UIA 消息可读性与顺序、sender / self 区分、稳定 ID 或锚点可靠性、输入 / 发送能力、消息长度和长时间轮询。未完成这些验证之前，不把固定 Gateway 标为企微端到端可用。
 

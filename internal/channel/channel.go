@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,15 +49,15 @@ func New(c config.Config) (*Channel, error) {
 }
 func (c *Channel) Close() error { return c.db.Close() }
 func (c *Channel) Enqueue(input protocol.ChatInput) error {
-	if !protocol.ValidID(input.ID) || len(input.Text) == 0 || len(input.Text) > protocol.MaxText {
-		return errors.New("invalid channel input")
+	if err := input.Validate(); err != nil {
+		return err
 	}
 	return c.db.Update(func(t *store.Tx) error {
 		var old protocol.ChatInput
 		e := t.Get("inputs", input.ID, &old)
 		if e == nil {
 			if old.Text != input.Text {
-				return errors.New("input ID already used for different text")
+				return fmt.Errorf("%w: input ID already used for different text", protocol.ErrInvalidInput)
 			}
 			return nil
 		}
@@ -83,7 +84,7 @@ func (c *Channel) Console(r io.Reader, w io.Writer) {
 		s := bufio.NewScanner(r)
 		s.Buffer(make([]byte, 4096), protocol.MaxText)
 		for s.Scan() {
-			if s.Text() == "" {
+			if strings.TrimSpace(s.Text()) == "" {
 				continue
 			}
 			if e := c.Enqueue(protocol.ChatInput{ID: protocol.ID("in_"), Text: s.Text()}); e != nil {
@@ -99,7 +100,7 @@ func (c *Channel) spool() error {
 	if c.c.Spool == "" {
 		return nil
 	}
-	for _, dir := range []string{"inbox", "outbox"} {
+	for _, dir := range []string{"inbox", "outbox", "rejected"} {
 		if e := os.MkdirAll(filepath.Join(c.c.Spool, dir), 0700); e != nil {
 			return e
 		}
@@ -115,20 +116,53 @@ func (c *Channel) spool() error {
 		}
 		var in protocol.ChatInput
 		if e = localfile.Read(filepath.Join(c.c.Spool, "inbox", f.Name()), &in); e != nil {
-			return e
+			var syntax *json.SyntaxError
+			var shape *json.UnmarshalTypeError
+			if !errors.As(e, &syntax) && !errors.As(e, &shape) && !errors.Is(e, io.ErrUnexpectedEOF) && !errors.Is(e, io.EOF) {
+				return e
+			}
 		}
-		if in.ID+".json" != f.Name() {
-			return errors.New("spool input ID mismatch")
+		if e != nil || in.ID+".json" != f.Name() || in.Validate() != nil {
+			if e = c.rejectSpool(f.Name()); e != nil {
+				return e
+			}
+			continue
 		}
 		inputs = append(inputs, in)
 	}
 	sort.SliceStable(inputs, func(i, j int) bool { return inputs[i].ObservedAt < inputs[j].ObservedAt })
 	for _, in := range inputs {
 		if e = c.Enqueue(in); e != nil {
+			if errors.Is(e, protocol.ErrInvalidInput) {
+				if e = c.rejectSpool(in.ID + ".json"); e == nil {
+					continue
+				}
+			}
 			return e
 		}
 	}
 	return nil
+}
+func (c *Channel) rejectSpool(name string) error {
+	// Retain the original bytes for inspection; one bad file cannot block peers.
+	if err := os.Rename(filepath.Join(c.c.Spool, "inbox", name), filepath.Join(c.c.Spool, "rejected", protocol.ID("bad_")+"_"+name)); err != nil {
+		return err
+	}
+	log.Printf("channel spool rejected: %s", name)
+	return nil
+}
+
+func (c *Channel) reject(id string, fault protocol.Fault) error {
+	err := c.db.Update(func(t *store.Tx) error {
+		if err := t.Put("rejected", id, fault); err != nil {
+			return err
+		}
+		return t.Delete("pending", id)
+	})
+	if err == nil {
+		log.Printf("channel input %s rejected: %s", id, fault.Message)
+	}
+	return err
 }
 func (c *Channel) deliver(o protocol.ChatOutput) error {
 	var seen bool
@@ -212,6 +246,14 @@ func (c *Channel) connected(parent context.Context, p *transport.Peer) error {
 						p.Close()
 						return
 					}
+					// Also drain invalid rows persisted by older versions.
+					if err := input.Input.Validate(); err != nil {
+						if c.reject(id, protocol.Fault{Code: "invalid", Message: err.Error()}) != nil {
+							p.Close()
+							return
+						}
+						continue
+					}
 					if p.Send(protocol.Wrap("chat", id, input.Input)) != nil {
 						p.Close()
 						return
@@ -226,6 +268,14 @@ func (c *Channel) connected(parent context.Context, p *transport.Peer) error {
 			return e
 		}
 		switch m.Type {
+		case "chat_reject":
+			fault, err := protocol.Decode[protocol.Fault](m)
+			if err != nil || !protocol.ValidID(m.ID) || fault.Code == "" {
+				return errors.New("invalid input rejection")
+			}
+			if err = c.reject(m.ID, fault); err != nil {
+				return err
+			}
 		case "chat_ack":
 			if m.Version != protocol.Version {
 				return errors.New("bad version")

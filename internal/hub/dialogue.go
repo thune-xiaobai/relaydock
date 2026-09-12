@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"sort"
+	"time"
 
 	"relaydock/internal/protocol"
 	"relaydock/internal/store"
 )
 
 func (h *Hub) context(owner string, d dialogue) (any, error) {
+	d = h.filterDialogue(owner, d)
 	nodes, err := h.db.List("nodes")
 	if err != nil {
 		return nil, err
@@ -78,10 +81,19 @@ func (h *Hub) context(owner string, d dialogue) (any, error) {
 
 func (h *Hub) process(ctx context.Context, j job) {
 	var d dialogue
-	err := h.db.Get("dialogues", j.Owner, &d)
-	if err != nil && !errors.Is(err, store.ErrMissing) {
+	if !retryStorage(ctx, "read dialogue "+j.Input.ID, func() error {
+		err := h.db.Get("dialogues", j.Owner, &d)
+		if errors.Is(err, store.ErrMissing) {
+			return nil
+		}
+		return err
+	}) {
 		return
 	}
+	d = h.filterDialogue(j.Owner, d)
+	// Inventory can expose any currently authorized node, including when no
+	// resource tool is called. Carry that scope into history and the final reply.
+	d.Nodes = append([]string{}, h.c.Channels[j.Owner].Nodes...)
 	data, err := h.context(j.Owner, d)
 	focus, remoteFocus := d.Focus, d.Remote
 	if j.Watch != nil {
@@ -90,7 +102,7 @@ func (h *Hub) process(ctx context.Context, j job) {
 	text := ""
 	blocked := false
 	if err == nil {
-		text, err = h.coordinator.Run(ctx, Turn{Owner: j.Owner, Input: j.Input.Text, Context: data}, func(ctx context.Context, name string, args json.RawMessage) ToolReply {
+		text, err = h.coordinator.Run(ctx, Turn{Owner: j.Owner, Input: j.Input.Text, Context: data, Nodes: d.Nodes}, func(ctx context.Context, name string, args json.RawMessage) ToolReply {
 			if blocked && mutation(name) {
 				return ToolReply{Error: "An earlier mutation has an uncertain result. Further mutations in this turn are blocked; inspect status.", Uncertain: true}
 			}
@@ -113,20 +125,65 @@ func (h *Hub) process(ctx context.Context, j job) {
 	if len(d.History) > 12 {
 		d.History = d.History[len(d.History)-12:]
 	}
-	_ = h.db.Update(func(t *store.Tx) error {
-		if e := t.Put("dialogues", j.Owner, d); e != nil {
-			return e
-		}
-		var r chatRecord
-		if e := t.Get("inbox", j.Owner+"/"+j.Input.ID, &r); e != nil {
-			return e
-		}
-		r.Done = true
-		if e := t.Put("inbox", j.Owner+"/"+j.Input.ID, r); e != nil {
-			return e
-		}
-		return h.queueOutput(t, j.Owner, protocol.ChatOutput{Text: text, Session: outputSession, RunID: outputRun, JobID: outputJob})
+	retryStorage(ctx, "finalize request "+j.Input.ID, func() error {
+		return h.db.Update(func(t *store.Tx) error {
+			var r chatRecord
+			if e := t.Get("inbox", j.Owner+"/"+j.Input.ID, &r); e != nil {
+				return e
+			}
+			if r.Done {
+				return nil
+			}
+			if e := t.Put("dialogues", j.Owner, d); e != nil {
+				return e
+			}
+			r.Done = true
+			if e := t.Put("inbox", j.Owner+"/"+j.Input.ID, r); e != nil {
+				return e
+			}
+			return h.queueOutput(t, j.Owner, protocol.ChatOutput{Text: text, Session: outputSession, RunID: outputRun, JobID: outputJob}, d.Nodes...)
+		})
 	})
+}
+
+func (h *Hub) filterDialogue(owner string, d dialogue) dialogue {
+	revoked := d.Nodes == nil && len(d.History) > 0
+	for _, node := range d.Nodes {
+		if !h.allowed(owner, node) {
+			revoked = true
+		}
+	}
+	if revoked {
+		// Free-text history cannot be selectively redacted by node.
+		d.History, d.Nodes = nil, []string{}
+		d.Focus, d.Remote, d.Pending = "", "", ""
+	}
+	return d
+}
+
+// Retain the completed result in memory and retry only the transaction, never
+// the coordinator or its tools. On shutdown an unfinished inbox row remains
+// uncertain and New reports it without replaying the original request.
+func retryStorage(ctx context.Context, operation string, fn func() error) bool {
+	delay := 100 * time.Millisecond
+	for {
+		if err := fn(); err == nil {
+			return true
+		} else {
+			log.Printf("hub %s: %v; retrying storage only", operation, err)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			log.Printf("hub %s: stopped before persistence; request remains uncertain", operation)
+			return false
+		case <-timer.C:
+		}
+		if delay < 2*time.Second {
+			delay *= 2
+		}
+	}
 }
 
 func (h *Hub) owned(owner, id string) (Binding, error) {

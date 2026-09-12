@@ -42,7 +42,7 @@ go build -o build/relaydock ./cmd/relaydock
 
 新生成的 Worker 默认启用 remote shell。仅需要 shell 时，`init` 加 `--shell-only`；旧 Worker 配置通过 `"shell": {"enabled": true}` 单独开启。用户可以说“在本机 project 目录运行测试”“查询刚才命令的输出”“取消刚才的命令”。每次调用独立，长命令完成后自动通知；详细语义与配置见 [remote shell 指南](docs/remote-shell.md)。
 
-Hub 每个协调回合启动一个 Node 子进程，按 Channel 恢复 pi 原生历史；SDK 代码随 Go 二进制内嵌，包使用本机 pi 安装。如果自动定位失败，在 Hub 配置中指定 `coordinator.package` 为已安装的 `@earendil-works/pi-coding-agent` 包目录；`coordinator.node` 可指定 Node 可执行文件。
+Hub 每个协调回合启动一个 Node 子进程，按 Channel 和授权节点范围恢复 pi 原生历史；SDK 桥接代码随 Go 二进制内嵌，包使用本机 pi 安装。如果自动定位失败，在 Hub 配置中指定 `coordinator.package` 为已安装的 `@earendil-works/pi-coding-agent` 包目录；`coordinator.node` 可指定 Node 可执行文件。
 
 ## Windows 企微接线
 
@@ -68,7 +68,8 @@ Gateway 复用 [pi-computer-use](https://github.com/injaneity/pi-computer-use) �
 ```sh
 go test -race ./...
 go vet ./...
-RELAYDOCK_TEST_PI=1 go test -race ./internal/hub -run 'TestRealPi(RemoteRuntime|Runtime)$' -v -count=1
+RELAYDOCK_TEST_PI=1 go test -race ./internal/hub -run 'TestRealPi(RemoteRuntime|Runtime|CoordinatorHistoryScope)$' -v -count=1
+RELAYDOCK_TEST_PI=1 go test -race ./internal/worker -run TestRealPiBridgeReceipts -v -count=1
 ```
 
 真实集成测试运行 pi SDK、多步工具调用、完成后唤醒、tmux 和交互式 pi，模型用隔离的本地测试服务。覆盖多会话、续接、本地输入回传、Worker 重启、去重、中断和 pi 退出。Gateway 使用本地协议与桌面夹具测试；测试不发送真实企微消息。

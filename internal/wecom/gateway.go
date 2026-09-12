@@ -157,7 +157,7 @@ func (g *Gateway) ingest(s Snapshot) error {
 	}
 	// Replay durable IDs if Channel acceptance was interrupted.
 	for _, in := range cp.Pending {
-		if err = g.input(in); err != nil {
+		if err = g.acceptInput(in); err != nil {
 			return err
 		}
 	}
@@ -168,9 +168,6 @@ func (g *Gateway) ingest(s Snapshot) error {
 	}
 	for _, m := range added {
 		if m.Sender == g.c.Peer {
-			if m.Text == "" || len(m.Text) > protocol.MaxText {
-				return errors.New("incoming message exceeds Hub text limit; checkpoint unchanged")
-			}
 			cp.Pending = append(cp.Pending, protocol.ChatInput{ID: protocol.ID("in_"), Text: m.Text, ObservedAt: protocol.Now()})
 		}
 	}
@@ -179,12 +176,28 @@ func (g *Gateway) ingest(s Snapshot) error {
 		return err
 	}
 	for _, in := range cp.Pending {
-		if err = g.input(in); err != nil {
+		if err = g.acceptInput(in); err != nil {
 			return err
 		}
 	}
 	cp.Pending = nil
 	return g.db.Put("meta", "checkpoint", cp)
+}
+
+func (g *Gateway) acceptInput(in protocol.ChatInput) error {
+	err := in.Validate()
+	if err == nil {
+		err = g.input(in)
+	}
+	if !errors.Is(err, protocol.ErrInvalidInput) {
+		return err
+	}
+	// Keep rejected occurrences durable before advancing the checkpoint.
+	if e := g.db.Put("rejected_inputs", in.ID, map[string]any{"input": in, "error": err.Error()}); e != nil {
+		return e
+	}
+	log.Printf("wecom input %s rejected: %v", in.ID, err)
+	return nil
 }
 func (g *Gateway) oldest() (*Delivery, error) {
 	all, err := g.db.List("deliveries")
