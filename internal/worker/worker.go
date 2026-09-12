@@ -22,6 +22,7 @@ import (
 	"relaydock/internal/config"
 	"relaydock/internal/localfile"
 	"relaydock/internal/protocol"
+	"relaydock/internal/remote"
 	"relaydock/internal/store"
 	"relaydock/internal/transport"
 )
@@ -38,15 +39,17 @@ var Tools = []protocol.Tool{
 }
 
 type Worker struct {
-	c  config.Config
-	db *store.Store
-	mu sync.Mutex
+	c     config.Config
+	db    *store.Store
+	mu    sync.Mutex
+	shell *remote.Manager
 }
 type callRecord struct {
 	Hash    string           `json:"hash"`
 	Result  *protocol.Result `json:"result,omitempty"`
 	Created string           `json:"created_session,omitempty"`
 	Target  string           `json:"target_session,omitempty"`
+	Remote  string           `json:"remote_job,omitempty"`
 }
 type Arguments struct {
 	Session   string `json:"session_id,omitempty"`
@@ -68,9 +71,21 @@ func New(c config.Config) (*Worker, error) {
 		return nil, err
 	}
 	w.db = db
+	if c.Shell.Enabled {
+		w.shell, err = remote.New(w.c, db)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return w, nil
 }
-func (w *Worker) Close() error         { return w.db.Close() }
+func (w *Worker) Close() error {
+	if w.shell != nil {
+		w.shell.Close()
+	}
+	return w.db.Close()
+}
 func (w *Worker) dir(id string) string { return filepath.Join(w.c.StateDir, "sessions", id) }
 func keys[V any](m map[string]V) []string {
 	out := []string{}
@@ -81,7 +96,16 @@ func keys[V any](m map[string]V) []string {
 	return out
 }
 func (w *Worker) Hello() protocol.Hello {
-	return protocol.Hello{Role: "worker", ID: w.c.ID, Name: w.c.Name, OS: runtime.GOOS, Tools: Tools, Workspaces: keys(w.c.Workspaces), Agents: keys(w.c.Agents)}
+	t := append([]protocol.Tool(nil), Tools...)
+	if len(w.c.Agents) == 0 {
+		t = t[:1]
+	}
+	h := protocol.Hello{Role: "worker", ID: w.c.ID, Name: w.c.Name, OS: runtime.GOOS, Tools: t, Workspaces: keys(w.c.Workspaces), Agents: keys(w.c.Agents)}
+	if w.shell != nil {
+		h.Tools = append(h.Tools, RemoteTools...)
+		h.Shell = w.shell.Info()
+	}
+	return h
 }
 
 func (w *Worker) inspect(id string) (protocol.Session, error) {
@@ -153,6 +177,11 @@ func (w *Worker) Call(ctx context.Context, c protocol.Call) protocol.Result {
 		if record.Result != nil && (record.Result.Error == nil || record.Result.Error.Code != "unknown") {
 			return *record.Result
 		}
+		if w.shell != nil && record.Remote != "" {
+			if s, e := w.shell.Status(record.Remote, "", 0); e == nil {
+				return protocol.OK(c.ID, s)
+			}
+		}
 		var a Arguments
 		_ = json.Unmarshal(c.Args, &a)
 		if protocol.ValidID(a.Session) {
@@ -173,9 +202,12 @@ func (w *Worker) Call(ctx context.Context, c protocol.Call) protocol.Result {
 	if !errors.Is(err, store.ErrMissing) {
 		return protocol.Fail(c.ID, "storage", err.Error())
 	}
-	var target Arguments
+	var target struct {
+		Session string `json:"session_id"`
+		JobID   string `json:"job_id"`
+	}
 	_ = json.Unmarshal(c.Args, &target)
-	record = callRecord{Hash: hash, Target: target.Session}
+	record = callRecord{Hash: hash, Target: target.Session, Remote: target.JobID}
 	if err = w.db.Put("calls", c.ID, record); err != nil {
 		return protocol.Fail(c.ID, "storage", err.Error())
 	}
@@ -202,6 +234,11 @@ func (w *Worker) Lookup(id string) protocol.Result {
 	if rec.Result != nil && (rec.Result.Error == nil || rec.Result.Error.Code != "unknown") {
 		return *rec.Result
 	}
+	if w.shell != nil && rec.Remote != "" {
+		if s, e := w.shell.Status(rec.Remote, "", 0); e == nil {
+			return protocol.OK(id, s)
+		}
+	}
 	if protocol.ValidID(rec.Target) {
 		var r protocol.Result
 		if localfile.Read(filepath.Join(w.dir(rec.Target), "receipts", id+".json"), &r) == nil && r.ID == id {
@@ -221,6 +258,9 @@ func (w *Worker) Lookup(id string) protocol.Result {
 }
 
 func (w *Worker) execute(ctx context.Context, c protocol.Call) protocol.Result {
+	if strings.HasPrefix(c.Tool, "remote.") {
+		return w.executeRemote(ctx, c)
+	}
 	var a Arguments
 	d := json.NewDecoder(bytes.NewReader(c.Args))
 	d.DisallowUnknownFields()
@@ -562,6 +602,10 @@ func (w *Worker) connected(parent context.Context, p *transport.Peer) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if e := w.sendRemoteEvents(p); e != nil {
+					p.Close()
+					return
+				}
 				if e := w.collect(); e != nil {
 					log.Printf("worker event journal: %v", e)
 					p.Close()
@@ -628,6 +672,13 @@ func (w *Worker) connected(parent context.Context, p *transport.Peer) error {
 				return errors.New("bad version")
 			}
 			if e = w.db.Delete("outbox", m.ID); e != nil {
+				return e
+			}
+		case "remote_ack":
+			if m.Version != protocol.Version {
+				return errors.New("bad version")
+			}
+			if e = w.db.Delete("remote_outbox", m.ID); e != nil {
 				return e
 			}
 		default:

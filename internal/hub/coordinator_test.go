@@ -66,7 +66,7 @@ func coordinatorFixture(w http.ResponseWriter, messages []fixtureMessage) {
 		}
 	}
 	name := ""
-	args := map[string]string{}
+	args := map[string]any{}
 	final := "已处理这项请求。"
 	if len(results) == 0 {
 		name = "inventory"
@@ -78,6 +78,19 @@ func coordinatorFixture(w http.ResponseWriter, messages []fixtureMessage) {
 			}
 		}
 		switch in.User {
+		case "启动远程长任务":
+			if len(results) == 1 {
+				name = "remote_exec"
+				args = map[string]any{"node": "n", "command": remoteCommand("sleep 30", "Start-Sleep -Seconds 30"), "cwd": "project", "wait_ms": 0, "timeout_ms": 60000}
+			}
+		case "检查远程任务", "停止远程任务":
+			if len(results) == 1 {
+				name = "remote_status"
+				if in.User == "停止远程任务" {
+					name = "remote_cancel"
+				}
+				args = map[string]any{"job_id": in.Context.Conversation.Remote}
+			}
 		case "在项目 A 开始检查", "在项目 B 开始检查":
 			switch len(results) {
 			case 1:
@@ -86,12 +99,12 @@ func coordinatorFixture(w http.ResponseWriter, messages []fixtureMessage) {
 				if in.User == "在项目 B 开始检查" {
 					workspace = "b"
 				}
-				args = map[string]string{"node": "local", "workspace": workspace, "agent": "pi", "title": in.User}
+				args = map[string]any{"node": "local", "workspace": workspace, "agent": "pi", "title": in.User}
 			case 2:
 				var s protocol.Session
 				_ = json.Unmarshal(results[1].Data, &s)
 				name = "agent_submit"
-				args = map[string]string{"session_id": s.ID, "text": in.User}
+				args = map[string]any{"session_id": s.ID, "text": in.User}
 			default:
 				final = "pi 已接受输入；结果会继续回传。"
 			}
@@ -104,14 +117,14 @@ func coordinatorFixture(w http.ResponseWriter, messages []fixtureMessage) {
 				for _, b := range inv.Sessions {
 					if b.Session.Workspace == "a" {
 						name = "agent_submit"
-						args = map[string]string{"session_id": b.Session.ID, "text": in.User}
+						args = map[string]any{"session_id": b.Session.ID, "text": in.User}
 					}
 				}
 			}
 		case "现在怎么样":
 			if len(results) == 1 {
 				name = "session_inspect"
-				args = map[string]string{"session_id": in.Context.Conversation.Focus}
+				args = map[string]any{"session_id": in.Context.Conversation.Focus}
 			}
 		case "等项目 A 本轮结束后总结", "总结项目 A 本轮结果":
 			if len(results) == 1 {
@@ -123,11 +136,11 @@ func coordinatorFixture(w http.ResponseWriter, messages []fixtureMessage) {
 					if b.Session.Workspace == "a" {
 						if in.User == "等项目 A 本轮结束后总结" {
 							name = "session_watch"
-							args = map[string]string{"session_id": b.Session.ID, "run_id": b.Session.RunID, "instruction": "总结项目 A 本轮结果"}
+							args = map[string]any{"session_id": b.Session.ID, "run_id": b.Session.RunID, "instruction": "总结项目 A 本轮结果"}
 						}
 						if in.User == "总结项目 A 本轮结果" {
 							name = "session_result"
-							args = map[string]string{"session_id": b.Session.ID}
+							args = map[string]any{"session_id": b.Session.ID}
 						}
 					}
 				}

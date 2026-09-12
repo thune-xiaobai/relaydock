@@ -1,0 +1,17 @@
+{
+  "state_dir": "shell-worker-state",
+  "id": "shell-node",
+  "name": "远程命令节点",
+  "hub": "wss://hub.internal:7331/ws",
+  "token": "env:RELAYDOCK_SHELL_WORKER_TOKEN",
+  "ca": "certs/internal-ca.pem",
+  "workspaces": {
+    "project": "../project"
+  },
+  "shell": {
+    "enabled": true,
+    "max_running": 4,
+    "max_timeout_ms": 3600000,
+    "max_output_bytes": 1048576
+  }
+}

@@ -30,8 +30,8 @@ func tool(name, description string, required []string, fields ...string) toolDef
 	return toolDefinition{name, description, map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}}
 }
 
-var coordinatorTools = []toolDefinition{
-	tool("inventory", "List authorized hosts, capabilities and owned sessions with latest recorded results.", []string{}),
+var coordinatorTools = append(remoteDefinitions(), []toolDefinition{
+	tool("inventory", "List authorized hosts, shell capabilities, owned sessions and recent shell jobs with latest recorded results.", []string{}),
 	tool("session_create", "Create an idle interactive pi in an advertised workspace. Does not submit a task. Reuse existing sessions where possible.", []string{"node", "workspace", "agent"}, "node", "workspace", "agent", "title"),
 	tool("session_inspect", "Read current session state from its Worker, plus last recorded result.", []string{"session_id"}, "session_id"),
 	tool("session_result", "Read stored session output and outcome, including when Worker is offline. Does not rerun.", []string{"session_id"}, "session_id"),
@@ -40,11 +40,11 @@ var coordinatorTools = []toolDefinition{
 	tool("terminal_capture", "Read the current terminal screen for an owned session.", []string{"session_id"}, "session_id"),
 	tool("session_close", "Close an owned session only when requested.", []string{"session_id"}, "session_id"),
 	tool("session_watch", "Resume Hub once after the specified run settles, following a user-authorized instruction. Also works if that run has just settled. Not a recurring monitor.", []string{"session_id", "run_id", "instruction"}, "session_id", "run_id", "instruction"),
-}
+}...)
 
 func mutation(name string) bool {
 	switch name {
-	case "session_create", "agent_submit", "agent_interrupt", "session_close", "session_watch":
+	case "session_create", "agent_submit", "agent_interrupt", "session_close", "session_watch", "remote_exec", "remote_cancel":
 		return true
 	}
 	return false
@@ -55,7 +55,7 @@ func mutation(name string) bool {
 func (h *Hub) executeTool(ctx context.Context, owner string, d *dialogue, name string, raw json.RawMessage) ToolReply {
 	data, err := h.tool(ctx, owner, d, name, raw)
 	if err != nil {
-		return ToolReply{Error: err.Error(), Uncertain: errors.Is(err, ErrUncertain)}
+		return ToolReply{Data: data, Error: err.Error(), Uncertain: errors.Is(err, ErrUncertain)}
 	}
 	return ToolReply{OK: true, Data: data}
 }
@@ -70,21 +70,11 @@ func (h *Hub) tool(ctx context.Context, owner string, d *dialogue, name string, 
 	if def == nil {
 		return nil, errors.New("unknown Hub tool")
 	}
-	var fields map[string]string
-	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return nil, errors.New("tool arguments must be a string-valued object")
+	if err := validateArguments(*def, raw); err != nil {
+		return nil, err
 	}
-	schema := def.Parameters.(map[string]any)
-	props := schema["properties"].(map[string]any)
-	for k, v := range fields {
-		if _, ok := props[k]; !ok || strings.TrimSpace(v) == "" || len(v) > protocol.MaxText {
-			return nil, fmt.Errorf("invalid argument %q", k)
-		}
-	}
-	for _, k := range schema["required"].([]string) {
-		if fields[k] == "" {
-			return nil, fmt.Errorf("missing argument %s", k)
-		}
+	if strings.HasPrefix(name, "remote_") {
+		return h.remoteTool(ctx, owner, d, name, raw)
 	}
 	var a struct {
 		Node, Workspace, Agent, Title, Text, Instruction string
@@ -122,7 +112,7 @@ func (h *Hub) tool(ctx context.Context, owner string, d *dialogue, name string, 
 			return nil, err
 		}
 		s.Node = a.Node
-		d.Focus = s.ID
+		d.Focus, d.Remote = s.ID, ""
 		return s, nil
 	}
 	b, err := h.owned(owner, a.Session)
@@ -132,7 +122,7 @@ func (h *Hub) tool(ctx context.Context, owner string, d *dialogue, name string, 
 	if name == "session_watch" {
 		return h.watch(owner, b, a.RunID, a.Instruction)
 	}
-	d.Focus = b.Session.ID
+	d.Focus, d.Remote = b.Session.ID, ""
 	if name == "session_result" {
 		return b, nil
 	}

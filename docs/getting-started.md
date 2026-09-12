@@ -1,6 +1,6 @@
 # 运行与接线指南
 
-版本：2026-09-12，架构 v0.7；本文件描述实际代码和边界。
+版本：2026-09-12，架构 v0.8；本文件描述实际代码和边界。
 
 ## 1. 当前可以运行的部分
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | 自然语言入口 | pi SDK agent loop + 流式工具调用；无模型配置时明确报错 |
 | Hub 协调 | 查看机器、创建任务、续接会话、状态/最近结果、终端快照、中断、关闭、Run 完成后的一次性后续；有歧义时可追问 |
-| Worker 工具 | `host.inspect`、`session.list/inspect/create/close`、`agent.submit/interrupt`、`terminal.capture` |
+| Worker 工具 | `host.inspect`、`session.list/inspect/create/close`、`agent.submit/interrupt`、`terminal.capture`、可选 `remote.exec/status/cancel` |
 | Agent | 交互式 pi，显式加载扩展；其他 Agent 尚未实现 |
 | 本地人工操作 | 直接 attach、输入；相关输入和输出继续同步，无接管状态 |
 | 多 Session | 不同目录可并行；一个实际目录或其上下级目录只分配一个活跃 Session |
@@ -23,7 +23,7 @@
 
 ## 2. 本地启动
 
-Hub 需要 Node.js 和已安装的 pi SDK，Worker 需要 tmux / psmux 和任务 pi。当前验证版本为 pi 0.85.1。
+Hub 需要 Node.js 和已安装的 pi SDK，提供交互 Agent 的 Worker 需要 tmux / psmux 和任务 pi；shell-only Worker 只需要可执行程序和本机 shell。当前验证版本为 pi 0.85.1。
 
 从仓库根目录执行，先准备一个可由本机用户访问的项目目录：
 
@@ -33,7 +33,7 @@ go build -o build/relaydock ./cmd/relaydock
   --model-url http://model-host:8000/v1 --model your-model
 ```
 
-`init` 生成三份配置和随机独立 token，拒绝覆盖已有目录。它不会修改 pi 设置或系统网络。配置中的相对路径相对于配置文件目录解析；`bridge` 是本项目扩展的绝对路径。
+`init` 生成三份配置和随机独立 token，拒绝覆盖已有目录。新 Worker 默认启用 remote shell；添加 `--shell-only` 可生成不需要 pi / mux 的 Worker。旧配置需要显式增加 `"shell": {"enabled": true}`；并发限制、超时、输出分页、Windows PowerShell 策略与恢复语义见 [remote shell 指南](remote-shell.md)。它不会修改 pi 设置或系统网络。配置中的相对路径相对于配置文件目录解析；`bridge` 是本项目扩展的绝对路径。
 
 Hub 模型支持如下配置；`url` 填 base URL，程序会追加 `/chat/completions`：
 
@@ -251,13 +251,15 @@ Worker 重启后重新读取原 Session，不重建 pi。重连时 Hub 只通过
 ```sh
 go test -race ./...
 go vet ./...
-RELAYDOCK_TEST_PI=1 go test -race ./internal/hub -run TestRealPiRuntime -v -count=1
+RELAYDOCK_TEST_PI=1 go test -race ./internal/hub -run 'TestRealPi(RemoteRuntime|Runtime)$' -v -count=1
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o build/relaydock-windows-amd64.exe ./cmd/relaydock
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/relaydock-linux-amd64 ./cmd/relaydock
 ```
 
 覆盖真正的 pi SDK 多步循环与结果驱动下一步、完成后唤醒、原生会话延续、并行任务、本地输入回传、Worker 重启、去重、中断和退出。Gateway 的本地协议 / 桌面夹具覆盖版本与 ID 检查、超时断开、源绑定、控件重新定位、聊天变化保护、重复文本 occurrence、检查点恢复、发送顺序及未知发送不重试。
 
-交叉编译只证明构建成功。目标 Windows 上仍需验证 psmux 的实际命令兼容性、helper protocol v3、UIA 消息可读性与顺序、sender / self 区分、稳定 ID 或锚点可靠性、输入 / 发送能力、消息长度和长时间轮询。未完成这些验证之前，不把固定 Gateway 标为企微端到端可用。
+shell 测试还覆盖本机进程输出、中文分页、并发/取消/超时、输出截断、WSS 断线完成补报、通知去重和 shell-only 运行。
+
+交叉编译只证明构建成功。目标 Windows 上 remote shell 还需验证 PowerShell 运行策略、本机程序退出码与编码、Job Object 的子进程清理。已有功能仍需验证 psmux 的实际命令兼容性、helper protocol v3、UIA 消息可读性与顺序、sender / self 区分、稳定 ID 或锚点可靠性、输入 / 发送能力、消息长度和长时间轮询。未完成这些验证之前，不把固定 Gateway 标为企微端到端可用。
 
 可替换边界是 `hub.Coordinator`、`internal/channel`、`wecom.Desktop` 和 Worker 的 pi / mux 适配。出现第二个真实 Agent 后再提取共有接口；当前不构建通用插件平台。

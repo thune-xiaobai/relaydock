@@ -1,6 +1,6 @@
 # RelayDock 架构设计
 
-v0.7，2026-09-12。本文描述当前实现；部署步骤及目标 Windows 的验证边界见 [运行指南](getting-started.md)。
+v0.8，2026-09-12。本文描述当前实现；部署步骤及目标 Windows 的验证边界见 [运行指南](getting-started.md)。
 
 ## 1. 目标与约束
 
@@ -27,6 +27,8 @@ flowchart TB
     W2[Windows Worker] <-->|Worker 主动建立 WSS| Hub
     W1 --> A1[tmux · 多个交互式 pi]
     W2 --> A2[psmux · 多个交互式 pi]
+    W1 --> S1[sh · 独立 shell jobs]
+    W2 --> S2[PowerShell · 独立 shell jobs]
 ```
 
 | 部分 | 做什么 | 不承担的职责 |
@@ -47,7 +49,8 @@ SDK 只开放下列自定义工具，不加载全局 / 项目扩展、Skills、�
 
 | Hub 工具 | 用途 |
 | --- | --- |
-| `inventory` | 获准节点及能力、所属 Session、最新记录 |
+| `inventory` | 获准节点及能力、所属 Session、最近 shell job、最新记录 |
+| `remote_exec` / `remote_status` / `remote_cancel` | 执行非交互命令、分页读日志和状态、取消 shell job |
 | `session_create` | 创建空闲交互会话，不自动提交任务 |
 | `session_inspect` / `session_result` | 查询真实运行状态 / 已保存结果 |
 | `agent_submit` | 向空闲会话提交自然语言任务，返回 Run ID |
@@ -90,7 +93,15 @@ Worker 保留已有工具：`host.inspect`、`session.list`、`session.inspect`�
 
 目录冲突、活跃 Session 数量、原生实例匹配和输入去重在 Worker 检查。Worker 可以重连到原 pi，无需替换进程。终端保留不等于 pi 健康；心跳、退出文件和 Agent 事件共同决定状态。具体边界见 [运行方案](runtime-tmux-pi.md)。
 
-## 6. 故障恢复与拓展
+## 6. Remote shell
+
+Worker 通过 `remote.exec/status/cancel` 在现有 WSS 连接上提供独立命令执行。`internal/remote` 管理进程组、输出文件、超时、取消和持久结果；Hub 仍由 pi SDK 理解请求并选择工具。命令启动后立即释放分派锁；Hub 只有限等待短命令，长命令完成通过持久事件通知聊天。
+
+Hub 下发前保存 job 归属，查询和取消均检查 Channel 与 Node 授权。结果与通知在同一事务中落盘、去重，迟到回执不能倒退终态。WSS 断线不取消命令；Worker 正常退出取消 shell jobs，Worker 异常退出后未落盘的最终结果标记 unknown，绝不自动重跑或按旧 PID 杀进程。完整接口、进程与恢复细节见 [remote shell 指南](remote-shell.md)。
+
+shell 为逐 Worker 可选能力；`init --shell-only` 可生成不依赖 pi/mux 的执行节点。cwd 别名用于定位目录，不是沙箱；任意 shell 在 Worker 当前用户权限内执行，独立于 pi Session 的目录排他检查。首版不提供 PTY、交互 stdin、后台服务托管或 shell job 的动态自动后续。保留 Go 和已有传输，不加入新的服务或插件框架。
+
+## 7. 故障恢复与拓展
 
 SQLite 使用事务和单进程目录锁。聊天入站、调用回执、事件、发件箱分别持久化：Hub 重启后继续处理尚未开始的入站请求；已开始却未完成的请求只报告不确定，不重新推理派发。旧版未完成记录没有 started 字段时也保守处理。Worker 重连时通过 `call_status` 查询旧调用回执，查询不触发执行。
 

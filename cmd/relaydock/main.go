@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"relaydock/internal/channel"
@@ -58,7 +59,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	switch mode {
 	case "wecom-inspect":
@@ -191,7 +192,8 @@ func run() error {
 func initConfig(args []string) error {
 	f := flag.NewFlagSet("init", flag.ContinueOnError)
 	dir := f.String("dir", ".relaydock", "new configuration directory")
-	workspace := f.String("workspace", ".", "existing pi workspace")
+	workspace := f.String("workspace", ".", "existing workspace")
+	shellOnly := f.Bool("shell-only", false, "generate a Worker with remote shell only, without pi/mux dependencies")
 	bridge := f.String("bridge", "extensions/relaydock.ts", "pi bridge extension")
 	modelURL := f.String("model-url", "", "OpenAI-compatible base URL, e.g. http://host:8000/v1")
 	modelName := f.String("model", "", "Hub tool-calling model name")
@@ -219,8 +221,13 @@ func initConfig(args []string) error {
 	}
 	cfg := map[string]config.Config{
 		"hub.json":     {StateDir: "hub-state", Listen: "127.0.0.1:7331", Workers: map[string]config.Peer{"local": {Token: workerToken}}, Channels: map[string]config.Peer{"console": {Token: channelToken, Nodes: []string{"local"}}}, Model: config.Model{URL: *modelURL, Model: *modelName}},
-		"worker.json":  {StateDir: "worker-state", ID: "local", Name: "本机", Hub: "ws://127.0.0.1:7331/ws", Token: workerToken, Backend: "tmux", Namespace: "relaydock", Bridge: ext, Workspaces: map[string]string{"project": work}, Agents: map[string]config.Agent{"pi": {Executable: "pi"}}, MaxRunning: 4},
+		"worker.json":  {StateDir: "worker-state", ID: "local", Name: "本机", Hub: "ws://127.0.0.1:7331/ws", Token: workerToken, Backend: "tmux", Namespace: "relaydock", Bridge: ext, Workspaces: map[string]string{"project": work}, Agents: map[string]config.Agent{"pi": {Executable: "pi"}}, MaxRunning: 4, Shell: config.Shell{Enabled: true}},
 		"channel.json": {StateDir: "channel-state", ID: "console", Hub: "ws://127.0.0.1:7331/ws", Token: channelToken, Spool: "spool"},
+	}
+	if *shellOnly {
+		c := cfg["worker.json"]
+		c.Agents, c.Backend, c.Mux, c.Namespace, c.Bridge = nil, "", "", "", ""
+		cfg["worker.json"] = c
 	}
 	for name, c := range cfg {
 		b, err := json.MarshalIndent(c, "", "  ")
@@ -231,6 +238,6 @@ func initConfig(args []string) error {
 			return err
 		}
 	}
-	fmt.Printf("Created local configs in %s\nConfigure hub.json model (and env:MODEL_KEY if needed), then start hub, worker and chat with --config.\nWindows: set worker backend/mux to psmux. LAN: configure Hub TLS and use wss.\n", root)
+	fmt.Printf("Created local configs in %s\nConfigure hub.json model (and env:MODEL_KEY if needed), then start hub, worker and chat with --config.\nShell enabled on the generated Worker; use --shell-only to omit pi sessions.\nWindows pi sessions: set worker backend/mux to psmux. LAN: configure Hub TLS and use wss.\n", root)
 	return nil
 }

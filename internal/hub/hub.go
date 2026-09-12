@@ -56,6 +56,7 @@ type historyItem struct {
 	Text string `json:"text"`
 }
 type dialogue struct {
+	Remote  string        `json:"remote_focus,omitempty"`
 	Focus   string        `json:"focus,omitempty"`
 	Pending string        `json:"pending,omitempty"`
 	History []historyItem `json:"history"`
@@ -129,6 +130,10 @@ func New(c config.Config, coordinator Coordinator) (*Hub, error) {
 			db.Close()
 			return nil, err
 		}
+	}
+	if err = h.recoverRemote(); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return h, nil
 }
@@ -254,6 +259,19 @@ func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
 					log.Printf("worker result: %v", e)
 					return
 				}
+			case "remote_event":
+				v, e := protocol.Decode[protocol.RemoteSnapshot](m)
+				if e != nil || m.ID != v.Job.ID {
+					return
+				}
+				ack, e := h.remoteEvent(id, v)
+				if e != nil {
+					log.Printf("remote event: %v", e)
+					return
+				}
+				if ack && p.Send(protocol.Wrap("remote_ack", m.ID, nil)) != nil {
+					return
+				}
 			case "event":
 				v, e := protocol.Decode[protocol.Event](m)
 				if e != nil {
@@ -328,6 +346,35 @@ func (h *Hub) result(node string, r protocol.Result) error {
 		if c.Result != nil && (c.Result.Error == nil || c.Result.Error.Code != "unknown") {
 			return nil
 		}
+		if strings.HasPrefix(c.Call.Tool, "remote.") && len(r.Data) > 0 {
+			var a protocol.RemoteArgs
+			var s protocol.RemoteSnapshot
+			if json.Unmarshal(c.Call.Args, &a) != nil || json.Unmarshal(r.Data, &s) != nil || s.Job.ID != a.JobID {
+				return errors.New("invalid shell result")
+			}
+			if _, e := h.mergeRemote(t, node, s); e != nil {
+				return e
+			}
+		} else if c.Call.Tool == "remote.exec" && r.Error != nil {
+			var a protocol.RemoteArgs
+			var b RemoteBinding
+			if e := json.Unmarshal(c.Call.Args, &a); e != nil {
+				return e
+			}
+			if e := t.Get("remote_jobs", a.JobID, &b); e != nil {
+				return e
+			}
+			if b.Snapshot.Job.Revision == 0 {
+				b.Snapshot.Job.Status = "failed"
+				if r.Error.Code == "unknown" {
+					b.Snapshot.Job.Status = "unknown"
+				}
+				b.Snapshot.Job.Error = r.Error.Message
+				if e := t.Put("remote_jobs", a.JobID, b); e != nil {
+					return e
+				}
+			}
+		}
 		c.Result = &r
 		if c.Call.Tool == "session.create" && len(r.Data) > 0 {
 			var s protocol.Session
@@ -374,7 +421,26 @@ func (h *Hub) call(ctx context.Context, owner, node, tool, title string, args an
 		return protocol.Result{}, errors.New("目标 Worker 离线；未派发操作")
 	}
 	c := protocol.Call{ID: protocol.ID("c_"), Tool: tool, Args: protocol.JSON(args)}
-	if err := h.db.Put("calls", c.ID, pendingCall{Node: node, Owner: owner, Title: title, Call: c}); err != nil {
+	if err := h.db.Update(func(t *store.Tx) error {
+		if tool == "remote.exec" {
+			var a protocol.RemoteArgs
+			if err := json.Unmarshal(c.Args, &a); err != nil {
+				return err
+			}
+			var b RemoteBinding
+			if err := t.Get("remote_jobs", a.JobID, &b); err != nil {
+				return err
+			}
+			if b.Owner != owner || b.Snapshot.Job.Node != node || b.Snapshot.Job.CallID != "" {
+				return errors.New("invalid shell dispatch ownership")
+			}
+			b.Snapshot.Job.CallID = c.ID
+			if err := t.Put("remote_jobs", a.JobID, b); err != nil {
+				return err
+			}
+		}
+		return t.Put("calls", c.ID, pendingCall{Node: node, Owner: owner, Title: title, Call: c})
+	}); err != nil {
 		return protocol.Result{}, err
 	}
 	ch := make(chan protocol.Result, 1)
@@ -402,6 +468,9 @@ func (h *Hub) call(ctx context.Context, owner, node, tool, title string, args an
 }
 
 func (h *Hub) putOutput(t *store.Tx, owner, text, session, run string) error {
+	return h.queueOutput(t, owner, protocol.ChatOutput{Text: text, Session: session, RunID: run})
+}
+func (h *Hub) queueOutput(t *store.Tx, owner string, o protocol.ChatOutput) error {
 	var seq int64
 	if err := t.Get("meta", "output_sequence", &seq); err != nil && !errors.Is(err, store.ErrMissing) {
 		return err
@@ -410,7 +479,7 @@ func (h *Hub) putOutput(t *store.Tx, owner, text, session, run string) error {
 	if err := t.Put("meta", "output_sequence", seq); err != nil {
 		return err
 	}
-	o := protocol.ChatOutput{ID: protocol.ID("out_"), Sequence: seq, Text: text, Session: session, RunID: run}
+	o.ID, o.Sequence = protocol.ID("out_"), seq
 	return t.Put("outbox", o.ID, delivery{owner, o})
 }
 func (h *Hub) event(node string, e protocol.Event) (bool, error) {

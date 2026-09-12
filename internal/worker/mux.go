@@ -107,24 +107,33 @@ func (w *Worker) start(ctx context.Context, s *protocol.Session) error {
 }
 
 func (w *Worker) validate() error {
-	if !protocol.ValidID(w.c.ID) || !protocol.ValidID(w.c.Namespace) {
+	if !protocol.ValidID(w.c.ID) {
 		return errors.New("invalid worker ID or mux namespace")
-	}
-	if w.c.Backend != "tmux" && w.c.Backend != "psmux" {
-		return errors.New("backend must be tmux or psmux")
 	}
 	if len(w.c.Token) < 24 {
 		return errors.New("worker token must have at least 24 characters")
 	}
-	if _, err := exec.LookPath(w.c.Mux); err != nil {
-		return err
+	if len(w.c.Agents) == 0 && !w.c.Shell.Enabled {
+		return errors.New("configure pi profiles or enable shell")
 	}
-	if _, err := os.Stat(w.c.Bridge); err != nil {
-		return fmt.Errorf("pi extension: %w", err)
+	if len(w.c.Agents) > 0 {
+		if !protocol.ValidID(w.c.Namespace) {
+			return errors.New("invalid mux namespace")
+		}
+		if w.c.Backend != "tmux" && w.c.Backend != "psmux" {
+			return errors.New("backend must be tmux or psmux")
+		}
+		if _, err := exec.LookPath(w.c.Mux); err != nil {
+			return err
+		}
+		if _, err := os.Stat(w.c.Bridge); err != nil {
+			return fmt.Errorf("pi extension: %w", err)
+		}
+		if len(w.c.Workspaces) == 0 {
+			return errors.New("configure at least one workspace for pi")
+		}
 	}
-	if len(w.c.Workspaces) == 0 || len(w.c.Agents) == 0 {
-		return errors.New("configure at least one workspace and pi profile")
-	}
+
 	for name, p := range w.c.Workspaces {
 		if !protocol.ValidID(name) {
 			return errors.New("invalid workspace alias")

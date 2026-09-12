@@ -49,13 +49,14 @@ type Tool struct {
 	Description string `json:"description"`
 }
 type Hello struct {
-	Role       string   `json:"role"`
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	OS         string   `json:"os,omitempty"`
-	Tools      []Tool   `json:"tools,omitempty"`
-	Workspaces []string `json:"workspaces,omitempty"`
-	Agents     []string `json:"agents,omitempty"`
+	Role       string     `json:"role"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	OS         string     `json:"os,omitempty"`
+	Tools      []Tool     `json:"tools,omitempty"`
+	Workspaces []string   `json:"workspaces,omitempty"`
+	Agents     []string   `json:"agents,omitempty"`
+	Shell      *ShellInfo `json:"shell,omitempty"`
 }
 type Call struct {
 	ID   string          `json:"call_id"`
@@ -115,6 +116,7 @@ type ChatOutput struct {
 	Text     string `json:"text"`
 	Session  string `json:"session_id,omitempty"`
 	RunID    string `json:"run_id,omitempty"`
+	JobID    string `json:"job_id,omitempty"`
 }
 type BridgeRequest struct {
 	CallID   string `json:"call_id"`

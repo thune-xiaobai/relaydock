@@ -57,6 +57,7 @@ type Config struct {
 	Agents      map[string]Agent  `json:"agents,omitempty"`
 	MaxRunning  int               `json:"max_running,omitempty"`
 	Spool       string            `json:"spool,omitempty"`
+	Shell       Shell             `json:"shell,omitempty"`
 }
 
 func Secret(s string) (string, error) {
@@ -91,6 +92,9 @@ func Load(path string) (Config, error) {
 	c.Bridge = abs(c.Bridge)
 	c.Spool = abs(c.Spool)
 	c.Coordinator.Package = abs(c.Coordinator.Package)
+	if strings.ContainsAny(c.Shell.Executable, `/\`) {
+		c.Shell.Executable = abs(c.Shell.Executable)
+	}
 	if strings.ContainsAny(c.Coordinator.Node, `/\`) {
 		c.Coordinator.Node = abs(c.Coordinator.Node)
 	}
