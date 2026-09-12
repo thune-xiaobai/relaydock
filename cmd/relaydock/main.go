@@ -17,6 +17,7 @@ import (
 	"relaydock/internal/config"
 	"relaydock/internal/hub"
 	"relaydock/internal/protocol"
+	"relaydock/internal/wecom"
 	"relaydock/internal/worker"
 )
 
@@ -28,7 +29,7 @@ func main() {
 }
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: relaydock init|hub|worker|chat|channel [options]")
+		return errors.New("usage: relaydock init|hub|worker|chat|channel|wecom-inspect|wecom-resolve|wecom-baseline [options]")
 	}
 	mode := os.Args[1]
 	if mode == "init" {
@@ -36,6 +37,10 @@ func run() error {
 	}
 	f := flag.NewFlagSet(mode, flag.ContinueOnError)
 	file := f.String("config", "", "JSON configuration path")
+	pid := f.Int("pid", 0, "native window process ID for inspection")
+	rootRef := f.String("root-ref", "", "native window root ref for read-only inspection")
+	outputID := f.String("output", "", "output ID to resolve")
+	delivery := f.String("delivery", "", "sent or retry (explicit delivery resolution)")
 	launch := f.String("launch", "", "internal launch file")
 	if err := f.Parse(os.Args[2:]); err != nil {
 		return err
@@ -43,7 +48,7 @@ func run() error {
 	if mode == "_spawn" {
 		return worker.Spawn(*launch)
 	}
-	if mode != "hub" && mode != "worker" && mode != "chat" && mode != "channel" {
+	if mode != "hub" && mode != "worker" && mode != "chat" && mode != "channel" && mode != "wecom-inspect" && mode != "wecom-resolve" && mode != "wecom-baseline" {
 		return errors.New("unknown command")
 	}
 	if *file == "" {
@@ -56,6 +61,52 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	switch mode {
+	case "wecom-inspect":
+		if c.WeCom == nil {
+			return errors.New("wecom configuration is required")
+		}
+		helper, err := wecom.StartHelper(ctx, c.WeCom.Helper)
+		if err != nil {
+			return err
+		}
+		defer helper.Close()
+		value, err := wecom.Inspect(ctx, helper, *pid, *rootRef, c.WeCom.Row)
+		if err != nil {
+			return err
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(value)
+	case "wecom-resolve":
+		db, err := wecom.OpenState(c.StateDir)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		return wecom.Resolve(db, *outputID, *delivery)
+	case "wecom-baseline":
+		if c.WeCom == nil {
+			return errors.New("wecom configuration is required")
+		}
+		helper, err := wecom.StartHelper(ctx, c.WeCom.Helper)
+		if err != nil {
+			return err
+		}
+		defer helper.Close()
+		desktop, err := wecom.NewWindows(helper, *c.WeCom)
+		if err != nil {
+			return err
+		}
+		g, err := wecom.New(c, desktop, nil)
+		if err != nil {
+			return err
+		}
+		defer g.Close()
+		if err = g.Baseline(ctx); err != nil {
+			return err
+		}
+		fmt.Println("Visible history was skipped. Restart channel, then send new requests.")
+		return nil
 	case "hub":
 		h, err := hub.New(c, nil)
 		if err != nil {
@@ -91,11 +142,15 @@ func run() error {
 		defer w.Close()
 		return w.Run(ctx)
 	case "chat", "channel":
-		if mode == "channel" && c.Spool == "" {
-			return errors.New("channel requires spool directory")
+		if mode == "channel" && c.Spool == "" && c.WeCom == nil {
+			return errors.New("channel requires wecom configuration or spool directory")
 		}
 		if mode == "chat" {
 			c.Spool = ""
+			c.WeCom = nil
+		}
+		if c.WeCom != nil && c.Spool != "" {
+			return errors.New("choose wecom or spool, not both")
 		}
 		ch, err := channel.New(c)
 		if err != nil {
@@ -105,6 +160,28 @@ func run() error {
 		if mode == "chat" {
 			fmt.Println("RelayDock：输入自然语言消息，Ctrl+C 退出。关闭本窗口不会关闭远端 pi。")
 			ch.Console(os.Stdin, os.Stdout)
+		}
+		if c.WeCom != nil {
+			helper, err := wecom.StartHelper(ctx, c.WeCom.Helper)
+			if err != nil {
+				return err
+			}
+			defer helper.Close()
+			desktop, err := wecom.NewWindows(helper, *c.WeCom)
+			if err != nil {
+				return err
+			}
+			gateway, err := wecom.New(c, desktop, ch.Enqueue)
+			if err != nil {
+				return err
+			}
+			defer gateway.Close()
+			ch.Output = gateway.EnqueueOutput
+			child, stop := context.WithCancel(ctx)
+			done := make(chan struct{})
+			go func() { defer close(done); gateway.Run(child) }()
+			defer func() { stop(); <-done }()
+			return ch.Run(child)
 		}
 		return ch.Run(ctx)
 	}
@@ -117,7 +194,7 @@ func initConfig(args []string) error {
 	workspace := f.String("workspace", ".", "existing pi workspace")
 	bridge := f.String("bridge", "extensions/relaydock.ts", "pi bridge extension")
 	modelURL := f.String("model-url", "", "OpenAI-compatible base URL, e.g. http://host:8000/v1")
-	modelName := f.String("model", "", "Hub intent model name")
+	modelName := f.String("model", "", "Hub tool-calling model name")
 	if err := f.Parse(args); err != nil {
 		return err
 	}

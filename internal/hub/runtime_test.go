@@ -48,44 +48,25 @@ func TestRealPiRuntime(t *testing.T) {
 	counts := map[string]int{}
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Model    string `json:"model"`
-			Messages []struct {
-				Role    string          `json:"role"`
-				Content json.RawMessage `json:"content"`
-			} `json:"messages"`
+			Model    string           `json:"model"`
+			Messages []fixtureMessage `json:"messages"`
+			Tools    []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
 		}
 		if e := json.NewDecoder(r.Body).Decode(&req); e != nil {
 			http.Error(w, e.Error(), 400)
 			return
 		}
-		if req.Model == "router" {
-			var content string
-			_ = json.Unmarshal(req.Messages[len(req.Messages)-1].Content, &content)
-			var input struct {
-				User    string `json:"user_request"`
-				Context struct {
-					Sessions     []Binding `json:"sessions"`
-					Conversation dialogue  `json:"conversation"`
-				} `json:"context"`
-			}
-			_ = json.Unmarshal([]byte(content), &input)
-			d := Decision{Action: "nodes"}
-			switch input.User {
-			case "在项目 A 开始检查":
-				d = Decision{Action: "start", Node: "local", Workspace: "a", Agent: "pi"}
-			case "在项目 B 开始检查":
-				d = Decision{Action: "start", Node: "local", Workspace: "b", Agent: "pi"}
-			case "继续项目 A":
-				for _, s := range input.Context.Sessions {
-					if s.Session.Workspace == "a" {
-						d = Decision{Action: "continue", Session: s.Session.ID}
-					}
+		if req.Model == "coordinator" {
+			for _, tool := range req.Tools {
+				if tool.Function.Name == "bash" || tool.Function.Name == "read" || tool.Function.Name == "write" {
+					t.Error("coordinator exposed builtin tool")
 				}
-			case "现在怎么样":
-				d = Decision{Action: "status", Session: input.Context.Conversation.Focus}
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": string(protocol.JSON(d))}}}})
+			coordinatorFixture(w, req.Messages)
 			return
 		}
 		text := ""
@@ -138,7 +119,7 @@ func TestRealPiRuntime(t *testing.T) {
 	if e := localfile.Write(filepath.Join(piDir, "models.json"), map[string]any{"providers": map[string]any{"fixture": map[string]any{"baseUrl": model.URL + "/v1", "api": "openai-completions", "apiKey": "fixture", "models": []any{map[string]any{"id": "fixture", "contextWindow": 64000, "maxTokens": 2000}}}}}); e != nil {
 		t.Fatal(e)
 	}
-	h, e := New(config.Config{StateDir: filepath.Join(tmp, "hub"), Listen: "127.0.0.1:0", Workers: map[string]config.Peer{"local": {Token: strings.Repeat("w", 32)}}, Channels: map[string]config.Peer{"console": {Token: strings.Repeat("c", 32), Nodes: []string{"local"}}}, Model: config.Model{URL: model.URL + "/v1", Model: "router"}}, nil)
+	h, e := New(config.Config{StateDir: filepath.Join(tmp, "hub"), Listen: "127.0.0.1:0", Workers: map[string]config.Peer{"local": {Token: strings.Repeat("w", 32)}}, Channels: map[string]config.Peer{"console": {Token: strings.Repeat("c", 32), Nodes: []string{"local"}}}, Model: config.Model{URL: model.URL + "/v1", Model: "coordinator"}}, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -243,6 +224,17 @@ func TestRealPiRuntime(t *testing.T) {
 		return b.Outcome == "completed" && strings.Contains(b.LastText, "FIXTURE_RESULT")
 	})
 	a := find("a")
+	sendChat("in_watch", "等项目 A 本轮结束后总结")
+	wait("watch resumed real coordinator", func() bool {
+		outMu.Lock()
+		defer outMu.Unlock()
+		for _, o := range outputs {
+			if strings.Contains(o.Text, "FOLLOWUP_FIXTURE") {
+				return true
+			}
+		}
+		return false
+	})
 	typeLocal := func(s protocol.Session, text string) {
 		t.Helper()
 		if out, e := exec.Command("tmux", "-L", ns, "send-keys", "-t", s.Pane, "-l", text).CombinedOutput(); e != nil {
@@ -363,5 +355,5 @@ func TestRealPiRuntime(t *testing.T) {
 	if live.Status != "exited" {
 		t.Fatal(live)
 	}
-	t.Log("real tmux/pi: parallel sessions, native continuation/switch, local/offline event replay, Worker restart, dedupe, interrupt and pi exit verified using fixture model")
+	t.Log("real pi SDK multistep coordinator + tmux/pi: parallel sessions, native continuation/switch, local/offline event replay, Worker restart, dedupe, interrupt and pi exit verified using fixture model")
 }

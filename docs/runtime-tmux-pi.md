@@ -71,7 +71,7 @@ tmux/psmux 负责创建、发现、attach 和保留终端。Worker 内的 `sessi
 
 不增加跨端已读标记或消息消重确认流程。事件游标表示系统处理进度，和用户读到哪里没有关联。用户在两个入口交替参与时，由用户自行理解已做过的操作。
 
-用于企微收发的 pi 保持独立会话；多个终端不会隔离同一个 Windows 桌面，因此 pi-computer-use 的桌面读写仍按 Gateway 原有串行约定执行。
+企微收发由独立 Gateway 的固定程序流程完成，复用 pi-computer-use native helper。多个终端不会隔离同一个 Windows 桌面，因此同一聊天的桌面动作仍由一个 Gateway 串行执行。
 
 ## 5. 并发与恢复的最小规则
 

@@ -1,0 +1,21 @@
+{
+  "state_dir": "wecom-state",
+  "id": "wecom-personal",
+  "hub": "wss://hub.internal:7331/ws",
+  "token": "env:WECOM_CHANNEL_TOKEN",
+  "ca": "certs/ca.pem",
+  "wecom": {
+    "app": "WXWork",
+    "window_title": "REPLACE_WITH_OBSERVED_WINDOW_TITLE",
+    "chat_title": "REPLACE_WITH_EXACT_CHAT_TITLE",
+    "chat": {"identifier": "REPLACE_WITH_CHAT_HEADER_IDENTIFIER"},
+    "messages": {"identifier": "REPLACE_WITH_MESSAGE_CONTAINER_IDENTIFIER"},
+    "row": {"role": "REPLACE_WITH_MESSAGE_ROW_ROLE"},
+    "input": {"identifier": "REPLACE_WITH_COMPOSER_IDENTIFIER"},
+    "send": {"identifier": "REPLACE_WITH_SEND_BUTTON_IDENTIFIER"},
+    "message_pattern": "^(?P<id>[^|]+)\\|(?P<sender>[^|]+)\\|(?P<text>[\\s\\S]+)$",
+    "peer": "REPLACE_WITH_SENDER_FROM_ROW_TEXT",
+    "self": "REPLACE_WITH_SELF_FROM_ROW_TEXT",
+    "poll_ms": 2000
+  }
+}

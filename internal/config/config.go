@@ -23,32 +23,40 @@ type Model struct {
 	Model string `json:"model"`
 	Key   string `json:"key,omitempty"`
 }
+
+// Pi selects the installed SDK runtime used by Hub, independently of task agents.
+type Pi struct {
+	Node    string `json:"node,omitempty"`
+	Package string `json:"package,omitempty"`
+}
 type Agent struct {
 	Executable string            `json:"executable"`
 	Args       []string          `json:"args,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 }
 type Config struct {
-	StateDir   string            `json:"state_dir"`
-	Listen     string            `json:"listen,omitempty"`
-	Cert       string            `json:"tls_cert,omitempty"`
-	Key        string            `json:"tls_key,omitempty"`
-	Workers    map[string]Peer   `json:"workers,omitempty"`
-	Channels   map[string]Peer   `json:"channels,omitempty"`
-	Model      Model             `json:"model,omitempty"`
-	Hub        string            `json:"hub,omitempty"`
-	ID         string            `json:"id,omitempty"`
-	Name       string            `json:"name,omitempty"`
-	Token      string            `json:"token,omitempty"`
-	CA         string            `json:"ca,omitempty"`
-	Backend    string            `json:"backend,omitempty"`
-	Mux        string            `json:"mux,omitempty"`
-	Namespace  string            `json:"namespace,omitempty"`
-	Bridge     string            `json:"bridge,omitempty"`
-	Workspaces map[string]string `json:"workspaces,omitempty"`
-	Agents     map[string]Agent  `json:"agents,omitempty"`
-	MaxRunning int               `json:"max_running,omitempty"`
-	Spool      string            `json:"spool,omitempty"`
+	StateDir    string            `json:"state_dir"`
+	Listen      string            `json:"listen,omitempty"`
+	Cert        string            `json:"tls_cert,omitempty"`
+	Key         string            `json:"tls_key,omitempty"`
+	Workers     map[string]Peer   `json:"workers,omitempty"`
+	Channels    map[string]Peer   `json:"channels,omitempty"`
+	Model       Model             `json:"model,omitempty"`
+	Coordinator Pi                `json:"coordinator,omitempty"`
+	WeCom       *WeCom            `json:"wecom,omitempty"`
+	Hub         string            `json:"hub,omitempty"`
+	ID          string            `json:"id,omitempty"`
+	Name        string            `json:"name,omitempty"`
+	Token       string            `json:"token,omitempty"`
+	CA          string            `json:"ca,omitempty"`
+	Backend     string            `json:"backend,omitempty"`
+	Mux         string            `json:"mux,omitempty"`
+	Namespace   string            `json:"namespace,omitempty"`
+	Bridge      string            `json:"bridge,omitempty"`
+	Workspaces  map[string]string `json:"workspaces,omitempty"`
+	Agents      map[string]Agent  `json:"agents,omitempty"`
+	MaxRunning  int               `json:"max_running,omitempty"`
+	Spool       string            `json:"spool,omitempty"`
 }
 
 func Secret(s string) (string, error) {
@@ -82,6 +90,13 @@ func Load(path string) (Config, error) {
 	c.CA = abs(c.CA)
 	c.Bridge = abs(c.Bridge)
 	c.Spool = abs(c.Spool)
+	c.Coordinator.Package = abs(c.Coordinator.Package)
+	if strings.ContainsAny(c.Coordinator.Node, `/\`) {
+		c.Coordinator.Node = abs(c.Coordinator.Node)
+	}
+	if c.WeCom != nil && c.WeCom.Helper != "" {
+		c.WeCom.Helper = abs(c.WeCom.Helper)
+	}
 	for k, p := range c.Workspaces {
 		c.Workspaces[k] = abs(p)
 	}

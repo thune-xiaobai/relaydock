@@ -34,8 +34,11 @@ type Binding struct {
 	EventPosition int64            `json:"event_position,omitempty"`
 }
 type chatRecord struct {
-	Input protocol.ChatInput `json:"input"`
-	Done  bool               `json:"done"`
+	Input    protocol.ChatInput `json:"input"`
+	Done     bool               `json:"done"`
+	Started  bool               `json:"started"`
+	Sequence int64              `json:"sequence"`
+	Watch    *watchRecord       `json:"watch,omitempty"`
 }
 type pendingCall struct {
 	Node   string           `json:"node"`
@@ -60,19 +63,19 @@ type dialogue struct {
 type job struct {
 	Owner string
 	Input protocol.ChatInput
+	Watch *watchRecord
 }
 type Hub struct {
-	c        config.Config
-	db       *store.Store
-	router   Router
-	mu       sync.Mutex
-	workers  map[string]*connection
-	channels map[string]*connection
-	waiters  map[string]chan protocol.Result
-	jobs     chan job
+	c           config.Config
+	db          *store.Store
+	coordinator Coordinator
+	mu          sync.Mutex
+	workers     map[string]*connection
+	channels    map[string]*connection
+	waiters     map[string]chan protocol.Result
 }
 
-func New(c config.Config, router Router) (*Hub, error) {
+func New(c config.Config, coordinator Coordinator) (*Hub, error) {
 	if err := c.CheckHub(); err != nil {
 		return nil, err
 	}
@@ -95,10 +98,10 @@ func New(c config.Config, router Router) (*Hub, error) {
 	if err != nil {
 		return nil, err
 	}
-	if router == nil {
-		router = ModelRouter{c.Model}
+	if coordinator == nil {
+		coordinator = PiCoordinator{Config: c}
 	}
-	h := &Hub{c: c, db: db, router: router, workers: map[string]*connection{}, channels: map[string]*connection{}, waiters: map[string]chan protocol.Result{}, jobs: make(chan job, 128)}
+	h := &Hub{c: c, db: db, coordinator: coordinator, workers: map[string]*connection{}, channels: map[string]*connection{}, waiters: map[string]chan protocol.Result{}}
 	// Do not replay an uncertain natural-language action after Hub restart.
 	m, err := db.List("inbox")
 	if err != nil {
@@ -111,7 +114,7 @@ func New(c config.Config, router Router) (*Hub, error) {
 			db.Close()
 			return nil, err
 		}
-		if r.Done {
+		if r.Done || (!r.Started && r.Sequence > 0) {
 			continue
 		}
 		owner, _, _ := strings.Cut(key, "/")
@@ -276,7 +279,6 @@ func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
 				if e != nil || !protocol.ValidID(v.ID) || strings.TrimSpace(v.Text) == "" || len(v.Text) > protocol.MaxText {
 					return
 				}
-				fresh := false
 				e = h.db.Update(func(t *store.Tx) error {
 					var old chatRecord
 					e := t.Get("inbox", id+"/"+v.ID, &old)
@@ -289,18 +291,10 @@ func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
 					if !errors.Is(e, store.ErrMissing) {
 						return e
 					}
-					fresh = true
-					return t.Put("inbox", id+"/"+v.ID, chatRecord{Input: v})
+					return h.queueInput(t, id, v)
 				})
 				if e != nil {
 					return
-				}
-				if fresh {
-					select {
-					case h.jobs <- job{id, v}:
-					case <-ctx.Done():
-						return
-					}
 				}
 				if p.Send(protocol.Wrap("chat_ack", v.ID, nil)) != nil {
 					return
@@ -367,6 +361,9 @@ func (h *Hub) result(node string, r protocol.Result) error {
 	return nil
 }
 func (h *Hub) call(ctx context.Context, owner, node, tool, title string, args any) (protocol.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return protocol.Result{}, err
+	}
 	if !h.allowed(owner, node) {
 		return protocol.Result{}, errors.New("无权操作这台机器")
 	}
@@ -386,15 +383,18 @@ func (h *Hub) call(ctx context.Context, owner, node, tool, title string, args an
 	h.mu.Unlock()
 	defer func() { h.mu.Lock(); delete(h.waiters, c.ID); h.mu.Unlock() }()
 	if err := peer.peer.Send(protocol.Wrap("call", c.ID, c)); err != nil {
-		return protocol.Result{}, errors.New("发送结果未知；请先查询会话状态")
+		return protocol.Result{}, fmt.Errorf("%w: 发送结果未知；请先查询会话状态", ErrUncertain)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
 	defer cancel()
 	select {
 	case <-ctx.Done():
-		return protocol.Result{}, errors.New("调用回执超时，执行结果未知；不会自动重发，请先查询状态")
+		return protocol.Result{}, fmt.Errorf("%w: 调用回执超时，执行结果未知；不会自动重发，请先查询状态", ErrUncertain)
 	case r := <-ch:
 		if r.Error != nil {
+			if r.Error.Code == "unknown" {
+				return r, fmt.Errorf("%w: %s", ErrUncertain, r.Error.Message)
+			}
 			return r, fmt.Errorf("%s: %s", r.Error.Code, r.Error.Message)
 		}
 		return r, nil
@@ -543,6 +543,18 @@ func (h *Hub) event(node string, e protocol.Event) (bool, error) {
 				return err
 			}
 		}
+		if e.Kind == "settled" {
+			var w watchRecord
+			if err := t.Get("watches", e.Session, &w); err == nil {
+				if w.RunID == e.RunID {
+					if err = h.fireWatch(t, w); err != nil {
+						return err
+					}
+				}
+			} else if !errors.Is(err, store.ErrMissing) {
+				return err
+			}
+		}
 		if text != "" {
 			return h.putOutput(t, b.Owner, text, e.Session, e.RunID)
 		}
@@ -569,12 +581,21 @@ func (h *Hub) Serve(ctx context.Context) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		tick := time.NewTicker(200 * time.Millisecond)
+		defer tick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case j := <-h.jobs:
-				h.process(ctx, j)
+			case <-tick.C:
+				j, err := h.nextJob()
+				if err != nil {
+					log.Printf("hub inbox: %v", err)
+					continue
+				}
+				if j != nil {
+					h.process(ctx, *j)
+				}
 			}
 		}
 	}()
