@@ -1,6 +1,6 @@
 # RelayDock 架构设计
 
-v0.8，2026-09-12。本文描述当前实现；部署步骤及目标 Windows 的验证边界见 [运行指南](getting-started.md)。
+v0.9，2026-09-22。本文描述当前实现；部署步骤及目标 Windows 的验证边界见 [运行指南](getting-started.md)。
 
 ## 1. 目标与约束
 
@@ -29,6 +29,8 @@ flowchart TB
     W2 --> A2[psmux · 多个交互式 pi]
     W1 --> S1[sh · 独立 shell jobs]
     W2 --> S2[PowerShell · 独立 shell jobs]
+    CLI[本地终端 · relaydock shell] <-->|独立 WSS 数据流| Hub
+    W1 --> PTY[PTY · 交互 shell]
 ```
 
 | 部分 | 做什么 | 不承担的职责 |
@@ -99,7 +101,11 @@ Worker 通过 `remote.exec/status/cancel` 在现有 WSS 连接上提供独立命
 
 Hub 下发前保存 job 归属，查询和取消均检查 Channel 与 Node 授权。结果与通知在同一事务中落盘、去重，迟到回执不能倒退终态。WSS 断线不取消命令；Worker 正常退出取消 shell jobs，Worker 异常退出后未落盘的最终结果标记 unknown，绝不自动重跑或按旧 PID 杀进程。完整接口、进程与恢复细节见 [remote shell 指南](remote-shell.md)。
 
-shell 为逐 Worker 可选能力；`init --shell-only` 可生成不依赖 pi/mux 的执行节点。cwd 别名用于定位目录，不是沙箱；任意 shell 在 Worker 当前用户权限内执行，独立于 pi Session 的目录排他检查。首版不提供 PTY、交互 stdin、后台服务托管或 shell job 的动态自动后续。保留 Go 和已有传输，不加入新的服务或插件框架。
+shell 为逐 Worker 可选能力；`init --shell-only` 可生成不依赖 pi/mux 的执行节点。cwd 别名用于定位目录，不是沙箱；任意 shell 在 Worker 当前用户权限内执行，独立于 pi Session 的目录排他检查。非交互 job 不提供后台服务托管或动态自动后续。
+
+`relaydock shell` 另行提供 Linux/macOS PTY 交互：客户端用 Channel 身份连接 Hub `/shell`，Hub 检查节点授权与 `shell.interactive` 能力，通过原控制连接发出一次启动请求；Worker 主动连接同端口 `/shell/worker` 加入临时数据流。Hub 直接转发键盘、输出、resize 和退出码，不调用协调模型、不持久化终端内容。数据连接独立于控制连接，支持同身份多终端并行，也不替换聊天连接。
+
+连接断开时挂断外层 shell，不重连或重放；独立 tmux 保留，用户在新 shell 内自行 attach。不增加接管或已读语义。每 Worker 的终端并发使用 `shell.max_running`，与批量 job 分开计数。`internal/terminal.Process` 和本地 console 是平台边界，Windows ConPTY/控制台实现暂留空；详见 [交互终端指南](interactive-shell.md)。保留单二进制和原 Hub 监听端口。
 
 ## 7. 故障恢复与拓展
 

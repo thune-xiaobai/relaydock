@@ -1,10 +1,10 @@
 # 运行与接线指南
 
-版本：2026-09-12，架构 v0.8；本文件描述实际代码和边界。
+版本：2026-09-22，架构 v0.9；本文件描述实际代码和边界。
 
 ## 1. 当前可以运行的部分
 
-一个 Go module，一个 `relaydock` 可执行程序，提供 `hub`、`worker`、`chat`、`channel` 和生成本地配置的 `init`。Hub 使用 pi SDK 进行多步协调，Go 保存权限、回执和 SQLite 状态；Worker 内含本机工具、tmux/psmux 命令和 pi 文件桥接。Hub 的 Node 子进程通过本地 JSON-lines 通道调用 Go 工具，不需要额外网络服务。
+一个 Go module，一个 `relaydock` 可执行程序，提供 `hub`、`worker`、`chat`、`channel`、交互终端 `shell` 和生成本地配置的 `init`。Hub 使用 pi SDK 进行多步协调，Go 保存权限、回执和 SQLite 状态；Worker 内含本机工具、tmux/psmux 命令和 pi 文件桥接。Hub 的 Node 子进程通过本地 JSON-lines 通道调用 Go 工具，不需要额外网络服务。
 
 `extensions/relaydock.ts` 运行在每个任务 pi 内。企微 Gateway 改为 Go 固定流程，直接调用 pi-computer-use 原生 Windows helper；旧 `extensions/wecom-gateway.ts` 已移除。
 
@@ -15,6 +15,7 @@
 | Worker 工具 | `host.inspect`、`session.list/inspect/create/close`、`agent.submit/interrupt`、`terminal.capture`、可选 `remote.exec/status/cancel` |
 | Agent | 交互式 pi，显式加载扩展；其他 Agent 尚未实现 |
 | 本地人工操作 | 直接 attach、输入；相关输入和输出继续同步，无接管状态 |
+| 远程人工操作 | 本地 `relaydock shell` 连接 Linux/macOS PTY，内部自行 tmux attach；Windows 待实现 |
 | 多 Session | 不同目录可并行；一个实际目录或其上下级目录只分配一个活跃 Session |
 | 恢复 | 同调用 ID 去重、旧回执查询、事件补报、Hub 已开始的未完成消息不自动重执行；未开始的消息按序恢复 |
 | 聊天适配 | console、文件 spool、固定 WeCom Gateway；三者共用 Channel 传输 |
@@ -88,6 +89,14 @@ tmux -L relaydock attach-session -t <上一步的会话名>
 ```
 
 退出聊天或 Worker 不会关闭 pi。关闭 Session 是显式操作；中断 Run 只调用 pi 的 abort。每个新 Session 的原始 pane ID 单独记录，终端快照不依赖当前焦点。
+
+若需要从本地终端进入远端 Linux/macOS 主机，运行：
+
+```sh
+./build/relaydock shell --config .relaydock/channel.json --node local --cwd project
+```
+
+将 `local` 改成配置中的 Worker ID。进入后直接执行上述 tmux 命令；Ctrl+C 传到远端，行首 `~.` 断开。复用 Channel 认证与节点权限，允许聊天入口继续在线。此命令不打开 Channel 状态目录；普通终端字节不会发送到模型或企微。配置、断线语义和 Windows 接口交接见 [交互终端指南](interactive-shell.md)。
 
 ## 3. 内网部署与 Windows
 

@@ -24,6 +24,7 @@ import (
 	"relaydock/internal/protocol"
 	"relaydock/internal/remote"
 	"relaydock/internal/store"
+	"relaydock/internal/terminal"
 	"relaydock/internal/transport"
 )
 
@@ -104,6 +105,7 @@ func (w *Worker) Hello() protocol.Hello {
 	if w.shell != nil {
 		h.Tools = append(h.Tools, RemoteTools...)
 		h.Shell = w.shell.Info()
+		h.Shell.Interactive = terminal.SupportsShell(h.Shell.Kind)
 	}
 	return h
 }
@@ -595,6 +597,11 @@ func (w *Worker) connected(parent context.Context, p *transport.Peer) error {
 	go p.KeepAlive(ctx)
 	go func() { <-ctx.Done(); p.Close() }()
 	jobs := make(chan protocol.Call, 32)
+	terminalLimit := 1
+	if w.shell != nil {
+		terminalLimit = w.shell.Info().MaxRunning
+	}
+	terminalSlots := make(chan struct{}, terminalLimit)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	defer wg.Wait()
@@ -669,6 +676,8 @@ func (w *Worker) connected(parent context.Context, p *transport.Peer) error {
 			return e
 		}
 		switch m.Type {
+		case "shell_open":
+			w.openTerminal(ctx, p, m, terminalSlots, &wg)
 		case "call_status":
 			if m.Version != protocol.Version {
 				return errors.New("bad version")

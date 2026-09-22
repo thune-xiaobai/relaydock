@@ -76,6 +76,7 @@ type Hub struct {
 	workers     map[string]*connection
 	channels    map[string]*connection
 	waiters     map[string]chan protocol.Result
+	terminals   map[string]*terminalBridge
 }
 
 func New(c config.Config, coordinator Coordinator) (*Hub, error) {
@@ -104,7 +105,7 @@ func New(c config.Config, coordinator Coordinator) (*Hub, error) {
 	if coordinator == nil {
 		coordinator = PiCoordinator{Config: c}
 	}
-	h := &Hub{c: c, db: db, coordinator: coordinator, workers: map[string]*connection{}, channels: map[string]*connection{}, waiters: map[string]chan protocol.Result{}}
+	h := &Hub{c: c, db: db, coordinator: coordinator, workers: map[string]*connection{}, channels: map[string]*connection{}, waiters: map[string]chan protocol.Result{}, terminals: map[string]*terminalBridge{}}
 	// Do not replay an uncertain natural-language action after Hub restart.
 	m, err := db.List("inbox")
 	if err != nil {
@@ -141,6 +142,9 @@ func New(c config.Config, coordinator Coordinator) (*Hub, error) {
 }
 func (h *Hub) Close() error {
 	h.mu.Lock()
+	for _, b := range h.terminals {
+		b.close()
+	}
 	for _, m := range []map[string]*connection{h.workers, h.channels} {
 		for _, c := range m {
 			c.peer.Close()
@@ -152,6 +156,8 @@ func (h *Hub) Close() error {
 func (h *Hub) Handler() http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("/ws", h.accept)
+	m.HandleFunc("/shell", h.acceptTerminal)
+	m.HandleFunc("/shell/worker", h.joinTerminal)
 	return m
 }
 func (h *Hub) allowed(owner, node string) bool {
@@ -163,8 +169,7 @@ func (h *Hub) allowed(owner, node string) bool {
 	return false
 }
 
-func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
-	role, id := "", ""
+func (h *Hub) authenticate(r *http.Request) (role, id string) {
 	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	for kind, peers := range map[string]map[string]config.Peer{"worker": h.c.Workers, "channel": h.c.Channels} {
 		for k, v := range peers {
@@ -173,6 +178,11 @@ func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	return
+}
+
+func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
+	role, id := h.authenticate(r)
 	if id == "" {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -208,6 +218,13 @@ func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		if peers[id] == c {
 			delete(peers, id)
+		}
+		if role == "worker" {
+			for _, b := range h.terminals {
+				if b.control == c {
+					b.close()
+				}
+			}
 		}
 		h.mu.Unlock()
 	}()
@@ -252,6 +269,17 @@ func (h *Hub) accept(w http.ResponseWriter, r *http.Request) {
 		}
 		if role == "worker" {
 			switch m.Type {
+			case "shell_error":
+				v, e := protocol.Decode[protocol.TerminalExit](m)
+				if e != nil {
+					return
+				}
+				h.mu.Lock()
+				b := h.terminals[m.ID]
+				h.mu.Unlock()
+				if b != nil && b.control == c {
+					b.fail(v.Error)
+				}
 			case "result":
 				v, e := protocol.Decode[protocol.Result](m)
 				if e != nil {

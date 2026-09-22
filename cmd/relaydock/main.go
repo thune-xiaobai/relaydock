@@ -18,19 +18,24 @@ import (
 	"relaydock/internal/config"
 	"relaydock/internal/hub"
 	"relaydock/internal/protocol"
+	"relaydock/internal/terminal"
 	"relaydock/internal/wecom"
 	"relaydock/internal/worker"
 )
 
 func main() {
 	if err := run(); err != nil {
+		var exit *terminal.ExitError
+		if errors.As(err, &exit) && exit.Code > 0 && exit.Code <= 255 {
+			os.Exit(exit.Code)
+		}
 		log.Print(err)
 		os.Exit(1)
 	}
 }
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: relaydock init|hub|worker|chat|channel|wecom-inspect|wecom-resolve|wecom-baseline [options]")
+		return errors.New("usage: relaydock init|hub|worker|chat|channel|shell|wecom-inspect|wecom-resolve|wecom-baseline [options]")
 	}
 	mode := os.Args[1]
 	if mode == "init" {
@@ -38,6 +43,8 @@ func run() error {
 	}
 	f := flag.NewFlagSet(mode, flag.ContinueOnError)
 	file := f.String("config", "", "JSON configuration path")
+	node := f.String("node", "", "target Worker for an interactive shell")
+	cwd := f.String("cwd", "", "remote workspace alias or absolute directory")
 	pid := f.Int("pid", 0, "native window process ID for inspection")
 	rootRef := f.String("root-ref", "", "native window root ref for read-only inspection")
 	outputID := f.String("output", "", "output ID to resolve")
@@ -49,7 +56,7 @@ func run() error {
 	if mode == "_spawn" {
 		return worker.Spawn(*launch)
 	}
-	if mode != "hub" && mode != "worker" && mode != "chat" && mode != "channel" && mode != "wecom-inspect" && mode != "wecom-resolve" && mode != "wecom-baseline" {
+	if mode != "shell" && mode != "hub" && mode != "worker" && mode != "chat" && mode != "channel" && mode != "wecom-inspect" && mode != "wecom-resolve" && mode != "wecom-baseline" {
 		return errors.New("unknown command")
 	}
 	if *file == "" {
@@ -62,6 +69,12 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	switch mode {
+	case "shell":
+		if *node == "" || *cwd == "" {
+			return errors.New("shell requires --node and --cwd")
+		}
+		fmt.Fprintln(os.Stderr, "RelayDock shell: Ctrl+C goes to the remote terminal; enter ~. at the start of a line to disconnect.")
+		return terminal.Run(ctx, c, protocol.TerminalOpen{Node: *node, CWD: *cwd}, os.Stdin, os.Stdout)
 	case "wecom-inspect":
 		if c.WeCom == nil {
 			return errors.New("wecom configuration is required")

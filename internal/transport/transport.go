@@ -2,7 +2,10 @@ package transport
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,7 +55,10 @@ func (p *Peer) KeepAlive(ctx context.Context) {
 		}
 	}
 }
-func Dial(ctx context.Context, c config.Config, hello protocol.Hello) (*Peer, error) {
+
+// Connect opens an authenticated socket without a protocol handshake. Route is
+// relative to the /ws endpoint's prefix; terminal sockets never register as chat.
+func Connect(ctx context.Context, c config.Config, route string) (*Peer, error) {
 	tls, err := config.ClientTLS(c)
 	if err != nil {
 		return nil, err
@@ -60,11 +66,31 @@ func Dial(ctx context.Context, c config.Config, hello protocol.Hello) (*Peer, er
 	d := websocket.Dialer{TLSClientConfig: tls, HandshakeTimeout: 15 * time.Second}
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+c.Token)
-	conn, _, err := d.DialContext(ctx, c.Hub, h)
+	address := c.Hub
+	if route != "" {
+		u, err := url.Parse(address)
+		if err != nil {
+			return nil, err
+		}
+		if !strings.HasSuffix(u.Path, "/ws") {
+			return nil, fmt.Errorf("Hub URL must end in /ws for terminal connections")
+		}
+		u.Path = strings.TrimSuffix(u.Path, "/ws") + "/" + route
+		u.RawPath = ""
+		address = u.String()
+	}
+	conn, _, err := d.DialContext(ctx, address, h)
 	if err != nil {
 		return nil, err
 	}
-	p := New(conn)
+	return New(conn), nil
+}
+
+func Dial(ctx context.Context, c config.Config, hello protocol.Hello) (*Peer, error) {
+	p, err := Connect(ctx, c, "")
+	if err != nil {
+		return nil, err
+	}
 	if err = p.Send(protocol.Wrap("hello", "", hello)); err != nil {
 		p.Close()
 		return nil, err

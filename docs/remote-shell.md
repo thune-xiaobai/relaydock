@@ -1,6 +1,8 @@
-# Remote shell：实现与使用
+# 非交互 Remote shell：实现与使用
 
 v0.8，2026-09-12。为 Hub 的 pi SDK 增加 `remote_exec`、`remote_status`、`remote_cancel` 三个自定义工具；Worker 使用现有 WSS 连接执行本机命令。聊天用户继续输入自然语言，例如“看看 Linux 构建机的磁盘空间”“在 project 目录跑测试，结束后告诉我”“停止刚才的测试”。
+
+2026-09-22 新增从本地终端连接的 `relaydock shell`，详见 [交互终端指南](interactive-shell.md)。下文仅描述非交互 job，其日志、超时、取消和恢复语义保持独立。
 
 ## 范围与模块
 
@@ -28,7 +30,7 @@ sequenceDiagram
 
 执行层位于 `internal/remote`；协议位于 `internal/protocol/remote.go`；Worker 和 Hub 各有一个 `remote.go` 适配文件。shell 生命周期不依赖 WSS 请求上下文。Worker 只短暂处理启动请求，命令在独立 goroutine 中等待退出，不长期占用调用分派锁。
 
-保留现有 pi 会话工具。shell 适合检查环境、执行脚本、构建测试、文件操作；需要交互终端和持续 Agent 上下文时仍用 tmux / psmux 中的 pi。首版没有 PTY、远程 stdin、文件传输协议、任意 per-call shell 可执行文件选择或动态插件注册。替换协调模型、聊天入口或 Agent 不要求改写这一层，也不引入 SSH 服务或新的监听端口。
+保留现有 pi 会话工具。非交互 shell 适合检查环境、执行脚本、构建测试、文件操作；持续 Agent 上下文由 tmux / psmux 中的 pi 保留。这些 job 不提供 PTY 或远程 stdin；需要直接交互时使用 `relaydock shell`。当前没有文件传输协议、任意 per-call shell 可执行文件选择或动态插件注册。替换协调模型、聊天入口或 Agent 不要求改写这一层，也不引入 SSH 服务或新的监听端口。
 
 ## 启用
 

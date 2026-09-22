@@ -12,6 +12,8 @@ flowchart LR
     Worker[Worker · 本机远程工具] <-->|主动建立 WSS| Hub
     Worker --> Sessions[tmux / psmux · 多个交互式 pi]
     Worker --> Shell[远程 shell · 独立非交互任务]
+    CLI[本地终端 · relaydock shell] <-->|WSS 终端字节流| Hub
+    Worker --> PTY[PTY · 交互 shell · Linux/macOS]
 ```
 
 - **Gateway**：定时读取指定聊天、提取新消息、保存检查点、按顺序发送 Hub 回复并核对回显。直接调用 pi-computer-use 的原生 Windows helper，无需另开企微操作 pi，也不调用模型。
@@ -41,6 +43,14 @@ go build -o build/relaydock ./cmd/relaydock
 可以说“有哪些机器”“在本机的 project 项目检查测试”“现在怎么样”“按刚才的建议继续”。Hub 根据自然语言和会话上下文调用工具；创建会话与提交输入是不同步骤，提交成功不代表任务完成。
 
 新生成的 Worker 默认启用 remote shell。仅需要 shell 时，`init` 加 `--shell-only`；旧 Worker 配置通过 `"shell": {"enabled": true}` 单独开启。用户可以说“在本机 project 目录运行测试”“查询刚才命令的输出”“取消刚才的命令”。每次调用独立，长命令完成后自动通知；详细语义与配置见 [remote shell 指南](docs/remote-shell.md)。
+
+在本地终端直接连接 Linux/macOS Worker：
+
+```sh
+./build/relaydock shell --config .relaydock/channel.json --node local --cwd project
+```
+
+支持真实 PTY、Ctrl+C、窗口缩放和远端退出码，进入后可自行 `tmux attach`。终端字节不经过模型，使用现有 Channel 的节点权限，不影响同时运行的聊天连接。断线后不自动重连或重放输入；Windows 平台适配暂留空。使用方式和 Windows 接口见 [交互终端指南](docs/interactive-shell.md)。
 
 Hub 每个协调回合启动一个 Node 子进程，按 Channel 和授权节点范围恢复 pi 原生历史；SDK 桥接代码随 Go 二进制内嵌，包使用本机 pi 安装。如果自动定位失败，在 Hub 配置中指定 `coordinator.package` 为已安装的 `@earendil-works/pi-coding-agent` 包目录；`coordinator.node` 可指定 Node 可执行文件。
 
@@ -74,4 +84,4 @@ RELAYDOCK_TEST_PI=1 go test -race ./internal/worker -run TestRealPiBridgeReceipt
 
 真实集成测试运行 pi SDK、多步工具调用、完成后唤醒、tmux 和交互式 pi，模型用隔离的本地测试服务。覆盖多会话、续接、本地输入回传、Worker 重启、去重、中断和 pi 退出。Gateway 使用本地协议与桌面夹具测试；测试不发送真实企微消息。
 
-[Remote shell](docs/remote-shell.md) · [架构设计](docs/architecture.md) · [运行指南](docs/getting-started.md) · [tmux / psmux 运行方案](docs/runtime-tmux-pi.md)
+[Remote shell](docs/remote-shell.md) · [交互终端](docs/interactive-shell.md) · [架构设计](docs/architecture.md) · [运行指南](docs/getting-started.md) · [tmux / psmux 运行方案](docs/runtime-tmux-pi.md)

@@ -1,6 +1,7 @@
 package protocol
 
 type ShellInfo struct {
+	Interactive    bool   `json:"interactive,omitempty"`
 	Kind           string `json:"kind"`
 	Executable     string `json:"executable"`
 	MaxRunning     int    `json:"max_running"`
