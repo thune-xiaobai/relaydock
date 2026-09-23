@@ -183,13 +183,7 @@ func conPTYPipe(input bool) (*os.File, windows.Handle, error) {
 }
 
 func terminalEnvironment(term string) ([]uint16, error) {
-	env := make([]string, 0, len(os.Environ())+1)
-	for _, value := range os.Environ() {
-		if !strings.HasPrefix(strings.ToUpper(value), "TERM=") {
-			env = append(env, value)
-		}
-	}
-	env = append(env, "TERM="+term)
+	env := shellEnvironment(os.Environ(), term)
 	// Windows environment blocks are case-insensitively sorted UTF-16 strings,
 	// each NUL terminated, followed by one extra NUL.
 	sort.Slice(env, func(i, j int) bool { return strings.ToUpper(env[i]) < strings.ToUpper(env[j]) })

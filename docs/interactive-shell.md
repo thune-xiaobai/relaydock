@@ -49,6 +49,14 @@ tmux -L relaydock attach-session -t <上一步列出的会话名>
 
 使用 tmux 自己的 detach 快捷键回到外层 shell。RelayDock 不添加 attach 命令、接管状态或跨端已读状态。受管 pi 原有事件仍可同步聊天；在交互 shell 中执行的普通命令不会自动成为 Hub 的 shell job，也不会把终端输出发到企微。
 
+是否形成终端嵌套，取决于运行 `relaydock shell` 客户端的终端位置：
+
+- Worker 在 mux 会话 A 中，客户端在独立终端中，远端 shell 再 attach A：这是给 A 增加一个客户端。Worker 为远端 shell 创建独立 PTY / ConPTY，终端输出只通过网络回到客户端，不写回 Worker 所在的 pane。
+- 客户端在 mux 会话 B 的 pane 中，再 attach A：A 的画面显示在 B 内，属于嵌套，类似在 tmux 中执行 SSH 后进入远端 tmux。两层会分别处理自己的快捷键。
+- 客户端就在 A 内，再经 RelayDock attach 回 A，并显示运行该客户端的 pane：可能形成画面回流。应从 A 外的独立终端连接。
+
+清理 Worker 继承的 mux 环境标记只解决新远端终端的误判，不检测客户端的显示链路，也不阻止上述自我回连。嵌套提示是否出现，不能单独用来判断是否存在嵌套或回流。
+
 客户端断线、Hub/Worker 控制连接丢失时，关闭本次 PTY，并挂断外层 shell。Unix 清理只对外层 shell 补发 SIGHUP，必要时终止该 shell；不采用批量执行的进程树清理，因此独立 tmux server 保留。普通前台/后台程序能否继续由其终端挂断行为决定；需要持续运行的任务放进 tmux。
 
 不自动重连、不重放键盘输入、不缓存供重连读取的输出。重新执行 `relaydock shell` 会打开一个新 shell，再自行 `tmux attach`。机器重启后的 tmux 恢复不在此功能范围内。
@@ -81,7 +89,7 @@ sequenceDiagram
 
 网络帧每块至多 16 KiB，字节按 base64 放入现有版本化 JSON envelope，保留 ANSI、中文和非 UTF-8 字节。连接内直接读写产生背压，单次网络写超时 10 秒；慢客户端会阻塞或断开自己的终端流，不增加无界内存队列。终端数据连接独立于 `/ws` 控制连接。启动等待至多约 15 秒；不持久化 stream、输入或输出，也不写入 Hub 的模型历史。
 
-shell 继承 Worker 当前用户权限和环境。节点授权允许操作该节点上启用的 shell；workspace 别名是目录定位，不是访问沙箱。它和受管 pi 可以同时操作同一目录。
+shell 继承 Worker 当前用户权限和环境，但新 PTY / ConPTY 不继承 Worker 所在终端的 `TMUX`、`TMUX_PANE`、`PSMUX_SESSION`、`PSMUX_ACTIVE` 及 psmux 会话路由标记，避免从 mux 内启动 Worker 后，新终端被误判为嵌套会话或命令被发往旧会话。此处理只作用于新 shell 的环境副本，不修改 Worker 或已存在的 mux 会话；用户的 mux 配置与显式嵌套策略保持不变。节点授权允许操作该节点上启用的 shell；workspace 别名是目录定位，不是访问沙箱。它和受管 pi 可以同时操作同一目录。
 
 原有聊天工具 `remote_exec/status/cancel` 继续用于带持久日志、超时、取消和完成通知的非交互任务，详见 [批量 remote shell](remote-shell.md)。
 
@@ -104,6 +112,8 @@ Windows Worker 的 `shell.kind` 使用 `powershell`，默认寻找 `pwsh`，不�
 psmux -L relaydock list-sessions
 psmux -L relaydock attach-session -t <会话名>
 ```
+
+若旧版 `relaydock shell` 中出现 `sessions should be nested with care`，更新并重启目标 Worker 后重新连接；只更新本地 CLI 不会改变远端 shell 的环境。已经真正 attach 进入 psmux 的 pane 后，嵌套检查仍然有效，此时可用 `tmux switch-client -t <会话名>` 切换，或先 detach 再 attach。
 
 ConPTY 清理会终止仍附着于该伪控制台的程序；RelayDock 不使用 Job Object 杀进程树。已脱离该终端的 psmux server 应在断线后保留，可重新连接并 attach。任意普通后台程序没有保活保证。
 
@@ -128,6 +138,6 @@ go test -race ./...
 go vet ./...
 ```
 
-普通构建与 `go test ./...` 不需要 C 编译器。Windows 原生测试使用独立隐藏控制台和真实 ConPTY，不修改调用者的终端或发送真实聊天。覆盖 PowerShell 5.1 / pwsh、中文/emoji、ANSI、Ctrl+C、Tab/方向键、缩放、完整退出码、读写取消、认证、并发限制、断线清理和控制台恢复；psmux 用例需要安装 psmux，且只清理测试创建的独立命名空间。Unix 原有测试继续覆盖 PTY、原始字节和 tmux 保活。
+普通构建与 `go test ./...` 不需要 C 编译器。Windows 原生测试使用独立隐藏控制台和真实 ConPTY，不修改调用者的终端或发送真实聊天。覆盖 PowerShell 5.1 / pwsh、中文/emoji、ANSI、Ctrl+C、Tab/方向键、缩放、完整退出码、读写取消、认证、并发限制、断线清理和控制台恢复；psmux 用例需要安装 psmux，且只清理测试创建的独立命名空间。其中一项将真实 Worker 子进程放进目标 psmux 会话，再从独立客户端 attach 回该会话，检查输出有界、控制通道响应、detach 与断线后重连。Unix 原有测试继续覆盖 PTY、原始字节和 tmux 保活。
 
 本次 Windows 验证环境为 Windows 11 企业版（build 26200）、psmux 3.3.3。Linux/macOS 的本次检查为交叉构建，原有 macOS 运行记录见前一提交。企微 UIA/Gateway 和受管 pi 的 Windows 现场验收仍是独立事项。

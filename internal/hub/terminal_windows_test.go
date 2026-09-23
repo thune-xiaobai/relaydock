@@ -406,6 +406,29 @@ func TestWindowsTerminalDisconnectPreservesPsmux(t *testing.T) {
 	if err != nil {
 		t.Skip("psmux is not installed")
 	}
+	// A Worker started inside an existing multiplexer inherits these markers.
+	// Each remote terminal must start outside that parent's pane so it can
+	// create and attach its own psmux session without forcing nested sessions.
+	inherited := map[string]string{
+		"PSMUX_SESSION":        "relaydock_parent_session",
+		"PSMUX_ACTIVE":         "1",
+		"PSMUX_SESSION_NAME":   "relaydock_parent_session",
+		"PSMUX_REMOTE_ATTACH":  "1",
+		"PSMUX_TARGET_SESSION": "relaydock_parent_session",
+		"PSMUX_TARGET_FULL":    "relaydock_parent_namespace__session",
+		"TMUX":                 "relaydock_parent_socket,123,0",
+		"TMUX_PANE":            "%43",
+	}
+	for name, value := range inherited {
+		t.Setenv(name, value)
+	}
+	t.Cleanup(func() {
+		for name, want := range inherited {
+			if got := os.Getenv(name); got != want {
+				t.Errorf("Worker environment changed: %s = %q, want %q", name, got, want)
+			}
+		}
+	})
 	f := setupWindowsTerminal(t, 4)
 	ns := "rdtty_" + protocol.ID("")[:12]
 	configPath := filepath.Join(t.TempDir(), "psmux.conf")
@@ -448,10 +471,10 @@ func TestWindowsTerminalDisconnectPreservesPsmux(t *testing.T) {
 	p := openWindowsTerminal(t, f.client)
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 	init := "$env:RD_MUX_SESSION = '" + ns + "'"
-	windowsTerminalType(t, p, fmt.Sprintf("& %s -L %s -f %s new-session -d -s persist -- %s -NoLogo -NoProfile -NoExit -Command %s\r", quote(psmux), ns, quote(configPath), quote(f.shell), quote(init)))
-	windowsTerminalMarker(t, p, "MUX_CREATED")
+	windowsTerminalType(t, p, fmt.Sprintf("& %s -L %s -f %s new-session -d -s persist -- %s -NoLogo -NoProfile -NoExit -Command %s; [Console]::WriteLine([char]95 + 'MUX_CREATED' + [char]95)\r", quote(psmux), ns, quote(configPath), quote(f.shell), quote(init)))
+	createdOutput := windowsTerminalUntil(t, p, "_MUX_CREATED_")
 	if out, err := mux("has-session", "-t", "persist"); err != nil {
-		t.Fatalf("psmux did not start inside ConPTY: %v: %s", err, out)
+		t.Fatalf("psmux did not start inside ConPTY: %v: %s; terminal output %q", err, out, createdOutput)
 	}
 	p.Close()
 	remoteEventually(t, func() bool { f.h.mu.Lock(); defer f.h.mu.Unlock(); return len(f.h.terminals) == 0 })

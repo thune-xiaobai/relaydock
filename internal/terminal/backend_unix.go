@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -27,12 +26,7 @@ type unixProcess struct {
 func Start(executable, cwd, term string, size protocol.TerminalSize) (Process, error) {
 	cmd := exec.Command(executable, "-i")
 	cmd.Dir = cwd
-	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "TERM=") {
-			cmd.Env = append(cmd.Env, v)
-		}
-	}
-	cmd.Env = append(cmd.Env, "TERM="+term)
+	cmd.Env = shellEnvironment(os.Environ(), term)
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: size.Cols, Rows: size.Rows})
 	if err != nil {
 		return nil, err
