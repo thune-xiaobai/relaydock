@@ -85,7 +85,7 @@ func (p *unixProcess) Wait() protocol.TerminalExit {
 		if status, ok := exit.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 			code = 128 + int(status.Signal())
 		}
-		return protocol.TerminalExit{Code: code}
+		return protocol.TerminalExit{Code: int64(code)}
 	}
 	return protocol.TerminalExit{Code: -1, Error: err.Error()}
 }

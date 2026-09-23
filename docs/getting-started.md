@@ -15,7 +15,7 @@
 | Worker 工具 | `host.inspect`、`session.list/inspect/create/close`、`agent.submit/interrupt`、`terminal.capture`、可选 `remote.exec/status/cancel` |
 | Agent | 交互式 pi，显式加载扩展；其他 Agent 尚未实现 |
 | 本地人工操作 | 直接 attach、输入；相关输入和输出继续同步，无接管状态 |
-| 远程人工操作 | 本地 `relaydock shell` 连接 Linux/macOS PTY，内部自行 tmux attach；Windows 待实现 |
+| 远程人工操作 | 本地 `relaydock shell` 连接 Linux/macOS PTY 或 Windows ConPTY，内部自行 tmux / psmux attach |
 | 多 Session | 不同目录可并行；一个实际目录或其上下级目录只分配一个活跃 Session |
 | 恢复 | 同调用 ID 去重、旧回执查询、事件补报、Hub 已开始的未完成消息不自动重执行；未开始的消息按序恢复 |
 | 聊天适配 | console、文件 spool、固定 WeCom Gateway；三者共用 Channel 传输 |
@@ -90,13 +90,13 @@ tmux -L relaydock attach-session -t <上一步的会话名>
 
 退出聊天或 Worker 不会关闭 pi。关闭 Session 是显式操作；中断 Run 只调用 pi 的 abort。每个新 Session 的原始 pane ID 单独记录，终端快照不依赖当前焦点。
 
-若需要从本地终端进入远端 Linux/macOS 主机，运行：
+若需要从本地终端进入远端 Windows / Linux / macOS 主机，运行：
 
 ```sh
 ./build/relaydock shell --config .relaydock/channel.json --node local --cwd project
 ```
 
-将 `local` 改成配置中的 Worker ID。进入后直接执行上述 tmux 命令；Ctrl+C 传到远端，行首 `~.` 断开。复用 Channel 认证与节点权限，允许聊天入口继续在线。此命令不打开 Channel 状态目录；普通终端字节不会发送到模型或企微。配置、断线语义和 Windows 接口交接见 [交互终端指南](interactive-shell.md)。
+将 `local` 改成配置中的 Worker ID。Windows 客户端使用 `.\build\relaydock.exe shell`；Windows Worker 默认打开 PowerShell，可在内部执行 psmux 命令。Ctrl+C 传到远端，行首 `~.` 断开。复用 Channel 认证与节点权限，允许聊天入口继续在线。此命令不打开 Channel 状态目录；普通终端字节不会发送到模型或企微。配置和断线语义见 [交互终端指南](interactive-shell.md)。
 
 ## 3. 内网部署与 Windows
 
@@ -146,7 +146,7 @@ Windows Worker 使用：
 
 这也是需要合入完整 Worker 配置的片段。按实际已安装的 pi 路径填写；npm 的 `pi.cmd` 是 shell 包装器，首版建议配置真正的 `node.exe + pi cli.js`，避免 `.cmd` 启动和引用规则。若已有原生 pi 可执行文件，也可直接配置。
 
-Windows 下运行 `relaydock.exe worker --config worker.json`。`psmux` 当前复用上游提供的 `-L`、命名 Session、多参数直接启动、`list-panes`、`capture-pane`、`kill-session` 子集；**尚未在目标 Windows 上验收**。所有清理都指定受管 Session，不调用全局 `kill-server`。
+Windows 下运行 `relaydock.exe worker --config worker.json`。`psmux` 当前复用上游提供的 `-L`、命名 Session、多参数直接启动、`list-panes`、`capture-pane`、`kill-session` 子集；**受管 pi 的完整链路尚未在目标 Windows 上验收**。交互 shell 的 ConPTY、psmux attach 与断线保活已通过 Windows 本机测试，见 [交互终端指南](interactive-shell.md)。所有清理都指定受管 Session，不调用全局 `kill-server`。
 
 受限 Windows 仍需验证本机允许执行这些程序、允许 psmux 的本机通信，以及可以主动连接选定 Hub。这些验证不要求改变管理员策略。
 

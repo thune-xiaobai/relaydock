@@ -26,8 +26,12 @@ import (
 func main() {
 	if err := run(); err != nil {
 		var exit *terminal.ExitError
-		if errors.As(err, &exit) && exit.Code > 0 && exit.Code <= 255 {
-			os.Exit(exit.Code)
+		if errors.As(err, &exit) {
+			status := exit.ExitStatus()
+			if int64(status) != exit.Code {
+				log.Print(err)
+			}
+			os.Exit(status)
 		}
 		log.Print(err)
 		os.Exit(1)

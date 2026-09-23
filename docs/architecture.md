@@ -1,6 +1,6 @@
 # RelayDock 架构设计
 
-v0.9，2026-09-22。本文描述当前实现；部署步骤及目标 Windows 的验证边界见 [运行指南](getting-started.md)。
+v0.10，2026-09-23。本文描述当前实现；部署步骤及目标 Windows 的验证边界见 [运行指南](getting-started.md)。
 
 ## 1. 目标与约束
 
@@ -103,9 +103,9 @@ Hub 下发前保存 job 归属，查询和取消均检查 Channel 与 Node 授�
 
 shell 为逐 Worker 可选能力；`init --shell-only` 可生成不依赖 pi/mux 的执行节点。cwd 别名用于定位目录，不是沙箱；任意 shell 在 Worker 当前用户权限内执行，独立于 pi Session 的目录排他检查。非交互 job 不提供后台服务托管或动态自动后续。
 
-`relaydock shell` 另行提供 Linux/macOS PTY 交互：客户端用 Channel 身份连接 Hub `/shell`，Hub 检查节点授权与 `shell.interactive` 能力，通过原控制连接发出一次启动请求；Worker 主动连接同端口 `/shell/worker` 加入临时数据流。Hub 直接转发键盘、输出、resize 和退出码，不调用协调模型、不持久化终端内容。数据连接独立于控制连接，支持同身份多终端并行，也不替换聊天连接。
+`relaydock shell` 另行提供 Linux/macOS PTY 和 Windows ConPTY 交互：客户端用 Channel 身份连接 Hub `/shell`，Hub 检查节点授权与 `shell.interactive` 能力，通过原控制连接发出一次启动请求；Worker 主动连接同端口 `/shell/worker` 加入临时数据流。Hub 直接转发键盘、输出、resize 和退出码，不调用协调模型、不持久化终端内容。数据连接独立于控制连接，支持同身份多终端并行，也不替换聊天连接。
 
-连接断开时挂断外层 shell，不重连或重放；独立 tmux 保留，用户在新 shell 内自行 attach。不增加接管或已读语义。每 Worker 的终端并发使用 `shell.max_running`，与批量 job 分开计数。`internal/terminal.Process` 和本地 console 是平台边界，Windows ConPTY/控制台实现暂留空；详见 [交互终端指南](interactive-shell.md)。保留单二进制和原 Hub 监听端口。
+连接断开时挂断外层 shell，不重连或重放；独立 tmux / psmux 保留，用户在新 shell 内自行 attach。不增加接管或已读语义。每 Worker 的终端并发使用 `shell.max_running`，与批量 job 分开计数。`internal/terminal.Process` 和本地 console 是平台边界，Windows 使用 ConPTY、可取消的管道读写及 VT 控制台；交互终端不使用批量 job 的进程树清理。详见 [交互终端指南](interactive-shell.md)。保留单二进制和原 Hub 监听端口。
 
 ## 7. 故障恢复与拓展
 

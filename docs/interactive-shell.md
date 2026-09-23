@@ -1,6 +1,6 @@
 # 从本地终端连接远端 shell
 
-2026-09-22。`relaydock shell` 提供 Linux/macOS 交互终端。Hub 转发终端字节，Worker 启动带 PTY 的 shell；这条链路不调用模型。Windows 的 ConPTY 后端和本地控制台适配留有接口，目前会明确返回不支持。
+2026-09-23。`relaydock shell` 提供 Windows / Linux / macOS 交互终端。Hub 转发终端字节，Worker 启动带 PTY / ConPTY 的 shell；这条链路不调用模型。Windows 需要提供 ConPTY API 的系统（Windows 10 1809 / Windows Server 2019 及以上）和支持 VT 的本地控制台。
 
 ## 使用
 
@@ -34,7 +34,7 @@ go build -o build/relaydock ./cmd/relaydock
 连接后：
 
 - `Ctrl+C`、Tab、方向键等输入交给远端 PTY；窗口变化同步到远端。
-- 输入 `exit` 或在空行按 `Ctrl+D` 退出 shell，CLI 返回其退出码。
+- 输入 `exit` 退出 shell（Unix shell 也可在空行按 `Ctrl+D`）。Windows 客户端保留远端完整 32 位退出码；Unix 客户端只能返回低 8 位，若非零远端退出码截断为 0，则返回 1 并打印原始退出码。
 - 行首输入 `~.` 主动断开；不确定是否在行首时先按 Enter。行首 `~~` 发送字面量 `~`，规则与 SSH 类似。
 - 正常退出、连接丢失或收到 SIGTERM 后恢复本地终端模式。
 
@@ -85,30 +85,49 @@ shell 继承 Worker 当前用户权限和环境。节点授权允许操作该节
 
 原有聊天工具 `remote_exec/status/cancel` 继续用于带持久日志、超时、取消和完成通知的非交互任务，详见 [批量 remote shell](remote-shell.md)。
 
-## Windows 实现交接
+## Windows 使用
 
-公共转发、认证、限流和协议已可复用。平台适配位于 `internal/terminal`：
+在 PowerShell 或 Windows Terminal 中构建并运行：
 
-| 文件 / 接口 | 待实现内容 |
-| --- | --- |
-| `backend.go` 的 `Process` | `Read`、`Write`、`Resize`、`Hangup`、`Kill`、`Wait` |
-| `backend_windows.go` | 创建 ConPTY、关联 shell 进程、字节流和尺寸更新；成功实现后启用 `Supported` 和按 kind 判断的 `SupportsShell` |
-| `client_windows.go` | `prepareConsole`：原始输入、VT 输出、窗口事件、关闭时唤醒阻塞输入，以及恢复原控制台状态 |
+```powershell
+go build -o build/relaydock.exe ./cmd/relaydock
+.\build\relaydock.exe shell --config .relaydock/channel.json --node local --cwd project
+```
 
-`Start` 接收配置归一化后的 shell 可执行文件、cwd、TERM 和尺寸；启动参数由平台实现决定。不要把 Unix 的 `-i` 原样用于 PowerShell。当前 Windows 默认 shell kind 是 `powershell`。
+Windows Worker 的 `shell.kind` 使用 `powershell`，默认寻找 `pwsh`，不可用时回退到 `powershell.exe`；也可通过 `shell.executable` 指定包含空格的完整路径。启动交互式 PowerShell 时加载用户 profile，然后将控制台输入输出及 `$OutputEncoding` 设为 UTF-8，保证中文和 emoji 不受默认代码页影响。Tab 补全和编辑行为由该 shell 的配置决定。批量 job 的 `-NonInteractive` / `-File` 参数不用于交互终端，程序不会更改执行策略。
 
-`Wait` 只调用一次并返回退出码；`Hangup` 必须可重复调用，并解除阻塞的 Read/Write；`Kill` 只用于外层 shell 的退出兜底。不要复用 `internal/remote` 的 `KILL_ON_JOB_CLOSE` 进程树策略，否则会杀掉希望保留的 psmux server。本地 `console.input.Close` 同样必须唤醒阻塞读，避免退出时卡住恢复流程。
+客户端关闭本地行缓冲、回显和 Ctrl+C 信号处理，通过 VT 输入把 Ctrl+C、方向键和 Tab 交给远端。Unicode 输入转为 UTF-8，输出启用 VT 并使用 UTF-8；窗口尺寸变化会同步。退出、取消和断线时解除阻塞的输入读取，恢复原控制台模式和代码页，并将远端启用的特殊键盘编码重置为普通输入，不关闭调用方 stdin/stdout。行首 `~.` / `~~` 同时适用于普通输入和 PowerShell 的 Win32 按键模式。
 
-Windows 现场重点验证：PowerShell 参数引用、中文和 ANSI、Ctrl+C、Tab、窗口缩放、网络中断、正常/信号退出后的控制台恢复，以及连接内启动/attach 的 psmux 在断线后继续存活。当前没有 Windows 运行验收。
+连接内可使用独立 psmux 会话：
+
+```powershell
+psmux -L relaydock list-sessions
+psmux -L relaydock attach-session -t <会话名>
+```
+
+ConPTY 清理会终止仍附着于该伪控制台的程序；RelayDock 不使用 Job Object 杀进程树。已脱离该终端的 psmux server 应在断线后保留，可重新连接并 attach。任意普通后台程序没有保活保证。
+
+平台实现位于 `internal/terminal/backend_windows.go` 和 `client_windows.go` / `input_windows.go`。后端关闭可取消的管道来解除阻塞，再关闭 ConPTY；退出兜底仅终止外层 shell。Windows 返回完整 DWORD 状态码，需要 Hub 和 CLI 一起更新，旧版本只接受 0..255。
 
 ## 验证
 
 ```sh
 go test -race ./...
 go vet ./...
-go test -race ./internal/hub -run 'Test(InteractiveTerminal|Terminal|ShellCLI)' -v -count=1
+go test -race ./internal/hub -run 'Test(Windows|InteractiveTerminal|Terminal|ShellCLI)' -v -count=1
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/relaydock-linux-amd64 ./cmd/relaydock
 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o build/relaydock-windows-amd64.exe ./cmd/relaydock
 ```
 
-集成测试使用真实 Hub、Worker、PTY 和本地 CLI，覆盖输入输出、退出码、Ctrl+C、Tab、中文/原始字节、resize、多终端隔离、并发上限、慢输出不阻塞控制链路、认证拒绝、迟到加入、tmux 存活和本地控制台恢复。测试不调用模型或发送真实聊天。tmux 存活用例需要本机安装 tmux。本次运行验证环境为 macOS；Linux 和 Windows 构建成功仍需各自在目标机器验收。
+Windows 下先让 C 编译器位于 PATH，再启用竞态检查；例如使用 LLVM-MinGW 时：
+
+```powershell
+$env:CGO_ENABLED = '1'
+$env:CC = 'clang'
+go test -race ./...
+go vet ./...
+```
+
+普通构建与 `go test ./...` 不需要 C 编译器。Windows 原生测试使用独立隐藏控制台和真实 ConPTY，不修改调用者的终端或发送真实聊天。覆盖 PowerShell 5.1 / pwsh、中文/emoji、ANSI、Ctrl+C、Tab/方向键、缩放、完整退出码、读写取消、认证、并发限制、断线清理和控制台恢复；psmux 用例需要安装 psmux，且只清理测试创建的独立命名空间。Unix 原有测试继续覆盖 PTY、原始字节和 tmux 保活。
+
+本次 Windows 验证环境为 Windows 11 企业版（build 26200）、psmux 3.3.3。Linux/macOS 的本次检查为交叉构建，原有 macOS 运行记录见前一提交。企微 UIA/Gateway 和受管 pi 的 Windows 现场验收仍是独立事项。

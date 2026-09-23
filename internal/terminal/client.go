@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -15,11 +16,26 @@ import (
 	"relaydock/internal/transport"
 )
 
-type ExitError struct{ Code int }
+type ExitError struct{ Code int64 }
 
 func (e *ExitError) Error() string { return fmt.Sprintf("remote shell exited with status %d", e.Code) }
 
-// Local console setup is a second, small platform boundary for Windows work.
+// ExitStatus preserves Windows DWORD status codes on Windows. Unix exposes
+// only eight bits, but a remote failure must never become local success.
+func (e *ExitError) ExitStatus() int {
+	if e.Code < 1 || e.Code > 1<<32-1 {
+		return 1
+	}
+	if runtime.GOOS == "windows" {
+		return int(uint32(e.Code))
+	}
+	if code := int(e.Code & 255); code != 0 {
+		return code
+	}
+	return 1
+}
+
+// Local console setup is independent of the remote shell's platform.
 type console struct {
 	input   io.ReadCloser
 	output  io.Writer
@@ -103,7 +119,7 @@ func Run(parent context.Context, c config.Config, open protocol.TerminalOpen, in
 					return
 				}
 				if len(data) > 0 {
-					// A pending '~' can expand this chunk by one byte.
+					// Buffered escape/key records can expand this chunk.
 					for len(data) > 0 {
 						size := min(len(data), protocol.TerminalChunk)
 						if e = p.Send(protocol.Wrap("shell_input", "", protocol.TerminalData{Bytes: data[:size]})); e != nil {
@@ -193,27 +209,105 @@ func exitResult(m protocol.Message) error {
 
 // Like SSH, '~.' at the start of a line closes the connection locally; '~~'
 // sends a literal '~'. State survives arbitrary network/keyboard chunking.
-type escapeFilter struct{ lineStart, pending bool }
+type escapeFilter struct {
+	lineStart, pending bool
+	pendingEncoded     bool
+	pendingBytes       []byte
+	sequence           []byte
+	sequenceHeld       bool
+	sequenceLineStart  bool
+}
 
 func (f *escapeFilter) feed(b []byte) ([]byte, bool) {
-	out := make([]byte, 0, len(b)+1)
+	out := make([]byte, 0, len(b)+len(f.pendingBytes))
 	for _, c := range b {
-		if f.pending {
-			f.pending = false
-			if c == '.' {
-				return out, true
+		if len(f.sequence) == 0 && c == '\x1b' {
+			f.sequenceLineStart = f.lineStart
+			f.sequenceHeld = f.pending && f.pendingEncoded
+			f.sequence = append(f.sequence, c)
+			if !f.sequenceHeld {
+				// Stream ESC immediately: a lone Escape key must not wait for
+				// another key just because it might begin a Win32 record.
+				f.key(&out, []byte{c}, int(c), false, false)
 			}
-			out = append(out, '~')
-			f.lineStart = false
-			if c == '~' {
-				continue
-			}
-		} else if f.lineStart && c == '~' {
-			f.pending = true
 			continue
 		}
-		out = append(out, c)
-		f.lineStart = c == '\r' || c == '\n'
+		if len(f.sequence) != 0 {
+			f.sequence = append(f.sequence, c)
+			if c == '_' && len(f.sequence) >= 3 {
+				if key, ok := parseWin32Key(f.sequence); ok {
+					f.lineStart = f.sequenceLineStart
+					raw := f.sequence
+					if !f.sequenceHeld {
+						// All preceding bytes are already on the wire. Holding
+						// this terminator still withholds the complete key event.
+						raw = []byte{'_'}
+					}
+					quit := f.key(&out, raw, key.char, key.passive, true)
+					f.sequence = f.sequence[:0]
+					if quit {
+						return out, true
+					}
+					continue
+				}
+			}
+			validPrefix := len(f.sequence) == 2 && c == '[' || len(f.sequence) > 2 && (c >= '0' && c <= '9' || c == ';')
+			if !validPrefix || len(f.sequence) >= 96 {
+				if f.sequenceHeld {
+					f.flushPending(&out)
+					out = append(out, f.sequence...)
+				} else {
+					out = append(out, c)
+				}
+				f.lineStart = c == '\r' || c == '\n'
+				f.sequence = f.sequence[:0]
+			} else if !f.sequenceHeld {
+				out = append(out, c)
+			}
+			continue
+		}
+		if f.key(&out, []byte{c}, int(c), false, false) {
+			return out, true
+		}
 	}
 	return out, false
+}
+
+func (f *escapeFilter) flushPending(out *[]byte) {
+	*out = append(*out, f.pendingBytes...)
+	f.pendingBytes = f.pendingBytes[:0]
+	f.pending = false
+	f.lineStart = false
+}
+
+func (f *escapeFilter) key(out *[]byte, raw []byte, char int, passive, encoded bool) bool {
+	if passive {
+		if f.pending {
+			f.pendingBytes = append(f.pendingBytes, raw...)
+			// Modifier/key-up floods must not grow an unfinished escape.
+			if len(f.pendingBytes) > 4096 {
+				f.flushPending(out)
+			}
+		} else {
+			*out = append(*out, raw...)
+		}
+		return false
+	}
+	if f.pending {
+		if char == '.' {
+			return true
+		}
+		f.flushPending(out)
+		if char == '~' {
+			return false
+		}
+	} else if f.lineStart && char == '~' {
+		f.pending = true
+		f.pendingEncoded = encoded
+		f.pendingBytes = append(f.pendingBytes[:0], raw...)
+		return false
+	}
+	*out = append(*out, raw...)
+	f.lineStart = char == '\r' || char == '\n'
+	return false
 }

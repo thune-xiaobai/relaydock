@@ -9,9 +9,9 @@ import (
 	"relaydock/internal/protocol"
 )
 
-var ErrUnsupported = errors.New("interactive terminals are implemented only on Linux/macOS; Windows backend is pending")
+var ErrUnsupported = errors.New("interactive terminals require Linux, macOS, or Windows 10 1809 / Windows Server 2019 or later")
 
-// Process is the platform boundary for the future Windows ConPTY backend.
+// Process is the platform boundary for PTY and Windows ConPTY backends.
 // Wait is called exactly once. Hangup must unblock Read/Write and hang up this
 // terminal; Kill only targets its outer shell, never detached mux servers.
 type Process interface {

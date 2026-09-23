@@ -13,14 +13,14 @@ flowchart LR
     Worker --> Sessions[tmux / psmux · 多个交互式 pi]
     Worker --> Shell[远程 shell · 独立非交互任务]
     CLI[本地终端 · relaydock shell] <-->|WSS 终端字节流| Hub
-    Worker --> PTY[PTY · 交互 shell · Linux/macOS]
+    Worker --> PTY[PTY / ConPTY · 交互 shell]
 ```
 
 - **Gateway**：定时读取指定聊天、提取新消息、保存检查点、按顺序发送 Hub 回复并核对回显。直接调用 pi-computer-use 的原生 Windows helper，无需另开企微操作 pi，也不调用模型。
 - **Hub**：通过成熟的 pi SDK 完成多步工具调用、对话延续和上下文压缩。Go 检查权限与参数，保存回执和事件，支持在指定 Run 结束后唤醒 Hub 处理已授权的后续安排。
 - **Worker**：提供 pi 会话与 remote shell 工具，报告状态和结果。shell 支持并发、增量日志、超时/取消与断线补报；执行任务的 pi 保留自己的模型、会话、扩展和交互终端。
 
-用户已经在目标 Windows 验证了 pi + pi-computer-use 收发普通企微消息的可行性。**新 Gateway 的 UIA 消息提取、发送控件和 psmux 仍需在目标 Windows 验证。** 仓库提供配置模板和只读检查命令，不把示例控件当成真实企微控件。
+用户已经在目标 Windows 验证了 pi + pi-computer-use 收发普通企微消息的可行性。**新 Gateway 的 UIA 消息提取、发送控件和受管 pi 的 psmux 接线仍需在目标 Windows 验证。** 交互 shell 的 ConPTY 与 psmux attach / 断线保活已有 Windows 本机测试。仓库提供配置模板和只读检查命令，不把示例控件当成真实企微控件。
 
 ## 本地启动
 
@@ -44,13 +44,13 @@ go build -o build/relaydock ./cmd/relaydock
 
 新生成的 Worker 默认启用 remote shell。仅需要 shell 时，`init` 加 `--shell-only`；旧 Worker 配置通过 `"shell": {"enabled": true}` 单独开启。用户可以说“在本机 project 目录运行测试”“查询刚才命令的输出”“取消刚才的命令”。每次调用独立，长命令完成后自动通知；详细语义与配置见 [remote shell 指南](docs/remote-shell.md)。
 
-在本地终端直接连接 Linux/macOS Worker：
+在本地终端直接连接 Windows / Linux / macOS Worker：
 
 ```sh
 ./build/relaydock shell --config .relaydock/channel.json --node local --cwd project
 ```
 
-支持真实 PTY、Ctrl+C、窗口缩放和远端退出码，进入后可自行 `tmux attach`。终端字节不经过模型，使用现有 Channel 的节点权限，不影响同时运行的聊天连接。断线后不自动重连或重放输入；Windows 平台适配暂留空。使用方式和 Windows 接口见 [交互终端指南](docs/interactive-shell.md)。
+支持真实 PTY / Windows ConPTY、Ctrl+C、窗口缩放和远端退出码，进入后可自行 `tmux attach` / `psmux attach`。Windows 客户端在 PowerShell / Windows Terminal 中运行 `relaydock.exe shell`，Windows Worker 默认启动交互式 PowerShell。终端字节不经过模型，使用现有 Channel 的节点权限，不影响同时运行的聊天连接。断线后不自动重连或重放输入。使用方式见 [交互终端指南](docs/interactive-shell.md)。
 
 Hub 每个协调回合启动一个 Node 子进程，按 Channel 和授权节点范围恢复 pi 原生历史；SDK 桥接代码随 Go 二进制内嵌，包使用本机 pi 安装。如果自动定位失败，在 Hub 配置中指定 `coordinator.package` 为已安装的 `@earendil-works/pi-coding-agent` 包目录；`coordinator.node` 可指定 Node 可执行文件。
 

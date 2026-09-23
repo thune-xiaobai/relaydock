@@ -44,7 +44,7 @@ type TerminalData struct {
 	Bytes []byte `json:"bytes"`
 }
 type TerminalExit struct {
-	Code  int    `json:"code"`
+	Code  int64  `json:"code"` // -1 for transport/startup errors, otherwise an OS exit status (Windows DWORD).
 	Error string `json:"error,omitempty"`
 }
 
@@ -86,7 +86,7 @@ func TerminalOutput(m Message) error {
 		}
 	case "shell_exit":
 		e, err := Decode[TerminalExit](m)
-		if err == nil && e.Code >= -1 && e.Code <= 255 && len(e.Error) <= MaxText {
+		if err == nil && e.Code >= -1 && e.Code <= 1<<32-1 && len(e.Error) <= MaxText {
 			return nil
 		}
 	}
